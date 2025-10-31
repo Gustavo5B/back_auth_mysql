@@ -1,7 +1,7 @@
 import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
 import dotenv from "dotenv";
-import { poolPromise } from "../config/db.js"; // ✅ tu conexión mysql2
+import { pool } from "../config/db.js"; // ✅ Usar pool directamente
 
 dotenv.config();
 
@@ -13,9 +13,7 @@ export const login = async (req, res) => {
       return res.status(400).json({ message: "Correo y contraseña son obligatorios." });
     }
 
-    const pool = await poolPromise;
-
-    // 🔹 Consulta MySQL (usa ? en lugar de @)
+    // ✅ pool ya tiene .promise() integrado
     const [rows] = await pool.query(
       "SELECT * FROM Usuarios WHERE correo = ?",
       [correo]
@@ -68,7 +66,7 @@ export const login = async (req, res) => {
   }
 };
 
-// ⭐ Login con código 2FA
+// ⭐ Login con código 2FA - AHORA CON VALIDACIÓN REAL
 export const loginWith2FA = async (req, res) => {
   try {
     const { correo, codigo2fa } = req.body;
@@ -77,7 +75,6 @@ export const loginWith2FA = async (req, res) => {
       return res.status(400).json({ message: "Correo y código son obligatorios" });
     }
 
-    const pool = await poolPromise;
     const [rows] = await pool.query(
       "SELECT * FROM Usuarios WHERE correo = ?",
       [correo]
@@ -88,7 +85,19 @@ export const loginWith2FA = async (req, res) => {
 
     const user = rows[0];
 
-    // ⚙️ Aquí deberías validar el código 2FA real (omitido por simplicidad)
+    // ✅ VALIDAR EL CÓDIGO TOTP REAL
+    const speakeasy = (await import("speakeasy")).default;
+    
+    const verified = speakeasy.totp.verify({
+      secret: user.secreto_2fa,
+      encoding: "base32",
+      token: codigo2fa,
+      window: 2 // permite 60 segundos de margen
+    });
+
+    if (!verified) {
+      return res.status(401).json({ message: "Código 2FA incorrecto ❌" });
+    }
 
     // ✅ Generar token después de validar 2FA
     const token = jwt.sign(

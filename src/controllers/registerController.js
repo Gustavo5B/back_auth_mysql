@@ -1,6 +1,6 @@
 import bcrypt from "bcrypt";
 import dotenv from "dotenv";
-import { poolPromise } from "../config/db.js";
+import { pool } from "../config/db.js"; // ✅ Usar pool directamente
 
 dotenv.config();
 
@@ -8,7 +8,18 @@ export const register = async (req, res) => {
   const { nombre, correo, contrasena } = req.body;
 
   try {
-    const pool = await poolPromise;
+    // Validaciones básicas
+    if (!nombre || !correo || !contrasena) {
+      return res.status(400).json({ 
+        message: "Todos los campos son obligatorios" 
+      });
+    }
+
+    if (contrasena.length < 8) {
+      return res.status(400).json({ 
+        message: "La contraseña debe tener al menos 8 caracteres" 
+      });
+    }
 
     // 🔹 Verificar si el correo ya existe
     const [existingUser] = await pool.query(
