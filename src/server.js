@@ -16,7 +16,7 @@ import { cleanupExpiredCodes } from './services/emailService.js'; // si limpias 
 // =========================================================
 dotenv.config();
 const app = express();
-const PORT = process.env.PORT || 4000;
+
 
 // =========================================================
 // 🔒 CONFIGURACIÓN DE CORS
@@ -65,8 +65,17 @@ cron.schedule('0 * * * *', () => {
 // =========================================================
 // 🚀 INICIO DEL SERVIDOR
 // =========================================================
+// =========================================================
+// 🚀 INICIO DEL SERVIDOR
+// =========================================================
+const PORT = process.env.PORT || 4000;
+
 app.listen(PORT, async () => {
-  console.log(`✅ Servidor corriendo en http://localhost:${PORT}`);
-  await testConnection();
-  console.log('🟢 Conexión MySQL verificada correctamente.');
+  console.log(`✅ Servidor corriendo en el puerto ${PORT}`);
+  try {
+    await testConnection();
+    console.log('🟢 Conexión MySQL verificada correctamente.');
+  } catch (error) {
+    console.error('❌ Error en la conexión MySQL:', error.message);
+  }
 });
