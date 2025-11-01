@@ -189,4 +189,10 @@ export const sendRecoveryCode = async (email, code) => {
     console.error('❌ Error al enviar email:', error);
     throw new Error('Error al enviar el código por correo');
   }
+  };
+  // ================================================================
+// 🧹 LIMPIEZA DE CÓDIGOS EXPIRADOS (Placeholder para Render)
+// ================================================================
+export const cleanupExpiredCodes = () => {
+  console.log("🧹 Limpieza de códigos expirados ejecutada (placeholder)");
 };
