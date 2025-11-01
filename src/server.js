@@ -9,7 +9,7 @@ import authRoutes from './routes/authRoutes.js';
 import recoveryRoutes from './routes/recoveryRoutes.js';
 import twoFactorRoutes from './routes/twoFactorRoutes.js';
 import { testConnection } from './config/db.js';
-import { cleanupExpiredCodes } from './services/emailService.js'; // si limpias códigos aquí
+import { cleanupExpiredCodes } from './services/emailService.js';
 
 // =========================================================
 // ⚙️ CONFIGURACIÓN INICIAL
@@ -17,18 +17,30 @@ import { cleanupExpiredCodes } from './services/emailService.js'; // si limpias 
 dotenv.config();
 const app = express();
 
+// =========================================================
+// 🔒 CONFIGURACIÓN DE CORS (producción + local)
+// =========================================================
+const allowedOrigins = [
+  process.env.FRONTEND_URL || 'https://front-auth-two.vercel.app', // 🔹 tu frontend en Vercel
+  'http://localhost:4200', // 🔹 entorno local Angular
+];
 
-// =========================================================
-// 🔒 CONFIGURACIÓN DE CORS
-// =========================================================
 app.use(
   cors({
-    origin: [
-      'https://front-auth-two.vercel.app', // frontend en Vercel
-      'http://localhost:4200' // entorno local
-    ],
+    origin: function (origin, callback) {
+      // Si no hay origen (por ejemplo en Postman), permitir
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        console.warn(`🚫 CORS bloqueó el origen no permitido: ${origin}`);
+        callback(new Error('No permitido por CORS'));
+      }
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    credentials: true
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
   })
 );
 
@@ -45,26 +57,25 @@ app.use('/api/recovery', recoveryRoutes);
 app.use('/api/2fa', twoFactorRoutes);
 
 // =========================================================
-// 🧪 RUTA DE PRUEBA (opcional para test rápido)
+// 🧪 RUTA DE PRUEBA
+// =========================================================
 app.get('/', (req, res) => {
   res.send('✅ Backend AUTH activo y corriendo correctamente.');
 });
 
 // =========================================================
-// 🕒 TAREAS PROGRAMADAS (CRON)
+// 🕒 TAREAS PROGRAMADAS (CRON cada hora)
 // =========================================================
-cron.schedule('0 * * * *', () => {
+cron.schedule('0 * * * *', async () => {
   console.log('🧹 Ejecutando limpieza de códigos expirados...');
   try {
-    cleanupExpiredCodes();
+    await cleanupExpiredCodes();
+    console.log('✅ Limpieza completada.');
   } catch (err) {
-    console.error('❌ Error al limpiar códigos expirados:', err.message);
+    console.error('❌ Error en limpieza automática:', err.message);
   }
 });
 
-// =========================================================
-// 🚀 INICIO DEL SERVIDOR
-// =========================================================
 // =========================================================
 // 🚀 INICIO DEL SERVIDOR
 // =========================================================
@@ -72,6 +83,7 @@ const PORT = process.env.PORT || 4000;
 
 app.listen(PORT, async () => {
   console.log(`✅ Servidor corriendo en el puerto ${PORT}`);
+
   try {
     await testConnection();
     console.log('🟢 Conexión MySQL verificada correctamente.');
