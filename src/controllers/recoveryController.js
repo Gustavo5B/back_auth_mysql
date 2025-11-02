@@ -5,7 +5,7 @@ import { generateCode, sendRecoveryCode } from "../services/emailService.js";
 
 dotenv.config();
 
-// 🔒 Rate limiting simple en memoria (considera usar Redis en producción)
+// 🔒 Rate limiting simple en memoria
 const rateLimitStore = new Map();
 const RATE_LIMIT_WINDOW = 15 * 60 * 1000; // 15 minutos
 const MAX_ATTEMPTS = 3;
@@ -14,7 +14,6 @@ const checkRateLimit = (correo) => {
   const now = Date.now();
   const userAttempts = rateLimitStore.get(correo) || [];
   
-  // Limpiar intentos antiguos
   const recentAttempts = userAttempts.filter(time => now - time < RATE_LIMIT_WINDOW);
   
   if (recentAttempts.length >= MAX_ATTEMPTS) {
@@ -44,43 +43,38 @@ export const requestRecoveryCode = async (req, res) => {
       });
     }
 
-    // Verificar que el usuario existe (pero no revelar si no existe - prevenir enumeración)
+    // Verificar que el usuario existe
     const [users] = await pool.query(
       'SELECT * FROM Usuarios WHERE correo = ?',
       [correo]
     );
 
-    // 🔒 SIEMPRE responder con éxito (timing-attack prevention)
-    // Solo enviar el código si el usuario existe
+    // SIEMPRE responder con éxito (timing-attack prevention)
     if (users.length > 0) {
-      // 🔒 Invalidar TODOS los códigos anteriores del usuario
+      // ✅ Minúsculas: codigosrecuperacion
       await pool.query(
         'UPDATE codigosrecuperacion SET usado = TRUE WHERE correo = ? AND usado = FALSE',
         [correo]
       );
 
-      // Generar código más seguro (alfanumérico)
       const codigo = generateCode();
       const fechaExpiracion = new Date();
       fechaExpiracion.setMinutes(fechaExpiracion.getMinutes() + 15);
 
-      // Guardar código en la base de datos
+      // ✅ Minúsculas: codigosrecuperacion
       await pool.query(
         'INSERT INTO codigosrecuperacion (correo, codigo, fecha_expiracion) VALUES (?, ?, ?)',
         [correo, codigo, fechaExpiracion]
       );
 
-      // Enviar código por email
       try {
         await sendRecoveryCode(correo, codigo);
-        console.log(`✅ Código enviado a ${correo}`);
+        console.log(`✅ Código enviado a ${correo}: ${codigo}`);
       } catch (emailError) {
         console.error('❌ Error al enviar email:', emailError);
-        // No revelar error de email al usuario
       }
     }
 
-    // Siempre responder igual (timing-attack prevention)
     res.json({ 
       message: "Si el correo existe, recibirás un código de recuperación",
       correo: correo
@@ -101,7 +95,7 @@ export const validateRecoveryCode = async (req, res) => {
       return res.status(400).json({ message: "Correo y código son obligatorios" });
     }
 
-    // Buscar código válido y no expirado
+    // ✅ Minúsculas: codigosrecuperacion
     const [codes] = await pool.query(
       `SELECT * FROM codigosrecuperacion 
        WHERE correo = ? 
@@ -144,21 +138,20 @@ export const resetPassword = async (req, res) => {
       return res.status(400).json({ message: "Todos los campos son obligatorios" });
     }
 
-    // Validación de contraseña mejorada
     if (nuevaContrasena.length < 8) {
       return res.status(400).json({ 
         message: "La contraseña debe tener al menos 8 caracteres" 
       });
     }
 
-    // 🔒 Validación adicional de complejidad
+    // 🔒 Validación adicional
     if (!/(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/.test(nuevaContrasena)) {
       return res.status(400).json({ 
         message: "La contraseña debe contener mayúsculas, minúsculas y números" 
       });
     }
 
-    // Verificar código válido y no expirado
+    // ✅ Minúsculas: codigosrecuperacion
     const [codes] = await connection.query(
       `SELECT * FROM codigosrecuperacion
        WHERE correo = ? 
@@ -175,7 +168,6 @@ export const resetPassword = async (req, res) => {
       return res.status(401).json({ message: "Código inválido o expirado" });
     }
 
-    // Verificar que el usuario existe
     const [users] = await connection.query(
       'SELECT id_usuario FROM Usuarios WHERE correo = ?',
       [correo]
@@ -186,16 +178,14 @@ export const resetPassword = async (req, res) => {
       return res.status(404).json({ message: "Usuario no encontrado" });
     }
 
-    // Encriptar nueva contraseña
     const hashedPassword = await bcrypt.hash(nuevaContrasena, 10);
 
-    // Actualizar contraseña del usuario
     await connection.query(
       'UPDATE Usuarios SET contrasena = ? WHERE correo = ?',
       [hashedPassword, correo]
     );
 
-    // 🔒 Invalidar TODOS los códigos del usuario (no solo el usado)
+    // ✅ Minúsculas: codigosrecuperacion
     await connection.query(
       'UPDATE codigosrecuperacion SET usado = TRUE WHERE correo = ?',
       [correo]
@@ -204,8 +194,6 @@ export const resetPassword = async (req, res) => {
     await connection.commit();
     
     console.log(`✅ Contraseña actualizada para ${correo}`);
-    
-    // 🔒 Limpiar rate limit después de éxito
     rateLimitStore.delete(correo);
     
     res.json({ 
@@ -221,9 +209,10 @@ export const resetPassword = async (req, res) => {
   }
 };
 
-// 🧹 Función de limpieza periódica (llamar con cron o scheduler)
+// 🧹 Función de limpieza periódica
 export const cleanupExpiredCodes = async () => {
   try {
+    // ✅ Minúsculas: codigosrecuperacion
     const [result] = await pool.query(
       'DELETE FROM codigosrecuperacion WHERE fecha_expiracion < NOW() OR usado = TRUE'
     );
@@ -231,5 +220,4 @@ export const cleanupExpiredCodes = async () => {
   } catch (error) {
     console.error('Error al limpiar códigos:', error);
   }
-  
 };
