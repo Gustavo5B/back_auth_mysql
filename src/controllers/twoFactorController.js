@@ -116,4 +116,53 @@ export const validateTOTP = async (req, res) => {
     console.error("❌ Error en validateTOTP:", error);
     res.status(500).json({ message: "Error al validar TOTP" });
   }
+  // Enviar código de 2FA por email durante el login
+router.post('/send-login-code', async (req, res) => {
+  try {
+    const { correo } = req.body;
+
+    if (!correo) {
+      return res.status(400).json({ message: 'El correo es obligatorio' });
+    }
+
+    // Verificar que el usuario existe
+    const [users] = await pool.query(
+      'SELECT * FROM Usuarios WHERE correo = ?',
+      [correo]
+    );
+
+    if (users.length === 0) {
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+    }
+
+    // Generar código de 6 dígitos
+    const codigo = Math.floor(100000 + Math.random() * 900000).toString();
+    const fechaExpiracion = new Date();
+    fechaExpiracion.setMinutes(fechaExpiracion.getMinutes() + 5);
+
+    // Invalidar códigos anteriores
+    await pool.query(
+      'UPDATE Codigos2FA SET usado = TRUE WHERE correo = ? AND usado = FALSE',
+      [correo]
+    );
+
+    // Guardar nuevo código
+    await pool.query(
+      'INSERT INTO Codigos2FA (correo, codigo, fecha_expiracion) VALUES (?, ?, ?)',
+      [correo, codigo, fechaExpiracion]
+    );
+
+    // Enviar email
+    await sendEmail2FA(correo, codigo);
+
+    res.json({ 
+      message: 'Código enviado correctamente',
+      expiresIn: '5 minutos'
+    });
+
+  } catch (error) {
+    console.error('❌ Error al enviar código:', error);
+    res.status(500).json({ message: 'Error al enviar el código' });
+  }
+});
 };
