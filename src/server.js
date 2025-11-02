@@ -3,7 +3,6 @@
 // =========================================================
 import express from 'express';
 import cron from 'node-cron';
-import cors from 'cors';
 import dotenv from 'dotenv';
 import authRoutes from './routes/authRoutes.js';
 import recoveryRoutes from './routes/recoveryRoutes.js';
@@ -18,31 +17,32 @@ dotenv.config();
 const app = express();
 
 // =========================================================
-// 🔒 CONFIGURACIÓN DE CORS (producción + local)
+// 🔒 CONFIGURACIÓN DE CORS (manual, compatible con Render + Vercel)
 // =========================================================
 const allowedOrigins = [
-  process.env.FRONTEND_URL || 'https://front-auth-two.vercel.app', // 🔹 tu frontend en Vercel
-  'http://localhost:4200', // 🔹 entorno local Angular
+  'https://front-auth-two.vercel.app', // ✅ TU FRONTEND EN VERCEL
+  'http://localhost:4200', // ✅ Desarrollo local
 ];
 
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      // Si no hay origen (por ejemplo en Postman), permitir
-      if (!origin) return callback(null, true);
+// Middleware manual para CORS
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  
+  if (allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+  }
 
-      if (allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        console.warn(`🚫 CORS bloqueó el origen no permitido: ${origin}`);
-        callback(new Error('No permitido por CORS'));
-      }
-    },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true,
-  })
-);
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Allow-Credentials', 'true');
+
+  // 🔹 Responder inmediatamente las solicitudes OPTIONS (preflight)
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+
+  next();
+});
 
 // =========================================================
 // 🧩 MIDDLEWARES GLOBALES
@@ -60,11 +60,15 @@ app.use('/api/2fa', twoFactorRoutes);
 // 🧪 RUTA DE PRUEBA
 // =========================================================
 app.get('/', (req, res) => {
-  res.send('✅ Backend AUTH activo y corriendo correctamente.');
+  res.json({ 
+    message: '✅ Backend AUTH activo',
+    status: 'running',
+    timestamp: new Date().toISOString()
+  });
 });
 
 // =========================================================
-// 🕒 TAREAS PROGRAMADAS (CRON cada hora)
+// 🕒 TAREAS PROGRAMADAS (Limpieza cada hora)
 // =========================================================
 cron.schedule('0 * * * *', async () => {
   console.log('🧹 Ejecutando limpieza de códigos expirados...');
