@@ -9,23 +9,31 @@ export const login = async (req, res) => {
   try {
     const { correo, contrasena } = req.body;
 
+    console.log('📥 Login attempt:', { correo, hasPassword: !!contrasena }); // ✅
+
     if (!correo || !contrasena) {
       return res.status(400).json({ message: "Correo y contraseña son obligatorios." });
     }
 
-    // ✅ pool ya tiene .promise() integrado
+    console.log('🔍 Buscando usuario en BD...'); // ✅
     const [rows] = await pool.query(
       "SELECT * FROM Usuarios WHERE correo = ?",
       [correo]
     );
 
+    console.log('📊 Resultados:', rows.length, 'usuario(s) encontrado(s)'); // ✅
+
     if (rows.length === 0)
       return res.status(404).json({ message: "Usuario no encontrado." });
 
     const user = rows[0];
+    console.log('👤 Usuario encontrado:', user.correo, '| 2FA habilitado:', user.esta_2fa_habilitado); // ✅
 
     // ✅ Verificar contraseña
+    console.log('🔐 Verificando contraseña...'); // ✅
     const match = await bcrypt.compare(contrasena, user.contrasena);
+    console.log('🔐 Match:', match); // ✅
+    
     if (!match)
       return res.status(401).json({ message: "Contraseña incorrecta." });
 
@@ -35,6 +43,7 @@ export const login = async (req, res) => {
 
     // ✅ Verificar si tiene 2FA habilitado
     if (user.esta_2fa_habilitado) {
+      console.log('✅ Requiere 2FA'); // ✅
       return res.json({
         message: "Credenciales correctas",
         requires2FA: true,
@@ -43,13 +52,14 @@ export const login = async (req, res) => {
       });
     }
 
-    // ✅ Si no tiene 2FA, generar token directamente
+    console.log('✅ Generando token JWT...'); // ✅
     const token = jwt.sign(
       { id_usuario: user.id_usuario, correo: user.correo },
       process.env.JWT_SECRET,
       { expiresIn: "1h" }
     );
 
+    console.log('✅ Login exitoso para:', user.correo); // ✅
     res.json({
       message: "Inicio de sesión exitoso ✅",
       token,
@@ -61,11 +71,11 @@ export const login = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("Error en login:", error);
+    console.error("❌ Error en login:", error.message); // ✅
+    console.error("❌ Stack:", error.stack); // ✅
     res.status(500).json({ message: "Error interno del servidor." });
   }
 };
-
 // ⭐ Login con código 2FA - AHORA CON VALIDACIÓN REAL
 export const loginWith2FA = async (req, res) => {
   try {
@@ -120,4 +130,5 @@ export const loginWith2FA = async (req, res) => {
     console.error("Error en loginWith2FA:", error);
     res.status(500).json({ message: "Error interno del servidor." });
   }
+  
 };
