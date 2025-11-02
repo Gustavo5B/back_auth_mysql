@@ -2,6 +2,7 @@
 // 📦 IMPORTACIONES
 // =========================================================
 import express from 'express';
+import cors from 'cors';
 import cron from 'node-cron';
 import dotenv from 'dotenv';
 import authRoutes from './routes/authRoutes.js';
@@ -17,32 +18,28 @@ dotenv.config();
 const app = express();
 
 // =========================================================
-// 🔒 CONFIGURACIÓN DE CORS (manual, compatible con Render + Vercel)
+// 🔒 CONFIGURACIÓN DE CORS (usando paquete cors)
 // =========================================================
 const allowedOrigins = [
-  'https://front-auth-two.vercel.app', // ✅ TU FRONTEND EN VERCEL
-  'http://localhost:4200', // ✅ Desarrollo local
+  'https://front-auth-two.vercel.app',
+  'http://localhost:4200'
 ];
 
-// Middleware manual para CORS
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  
-  if (allowedOrigins.includes(origin)) {
-    res.header('Access-Control-Allow-Origin', origin);
-  }
-
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.header('Access-Control-Allow-Credentials', 'true');
-
-  // 🔹 Responder inmediatamente las solicitudes OPTIONS (preflight)
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-
-  next();
-});
+app.use(cors({
+  origin: function (origin, callback) {
+    // Permitir peticiones sin origin (como Postman, Thunder Client)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) === -1) {
+      const msg = 'CORS policy: This origin is not allowed';
+      return callback(new Error(msg), false);
+    }
+    return callback(null, true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
 // =========================================================
 // 🧩 MIDDLEWARES GLOBALES
@@ -63,7 +60,8 @@ app.get('/', (req, res) => {
   res.json({ 
     message: '✅ Backend AUTH activo',
     status: 'running',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    cors: allowedOrigins
   });
 });
 
@@ -87,6 +85,7 @@ const PORT = process.env.PORT || 4000;
 
 app.listen(PORT, async () => {
   console.log(`✅ Servidor corriendo en el puerto ${PORT}`);
+  console.log(`🌐 CORS habilitado para:`, allowedOrigins);
 
   try {
     await testConnection();
