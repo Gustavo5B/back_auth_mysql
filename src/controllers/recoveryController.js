@@ -55,7 +55,7 @@ export const requestRecoveryCode = async (req, res) => {
     if (users.length > 0) {
       // 🔒 Invalidar TODOS los códigos anteriores del usuario
       await pool.query(
-        'UPDATE CodigosRecuperacion SET usado = TRUE WHERE correo = ? AND usado = FALSE',
+        'UPDATE codigosrecuperacion SET usado = TRUE WHERE correo = ? AND usado = FALSE',
         [correo]
       );
 
@@ -66,7 +66,7 @@ export const requestRecoveryCode = async (req, res) => {
 
       // Guardar código en la base de datos
       await pool.query(
-        'INSERT INTO CodigosRecuperacion (correo, codigo, fecha_expiracion) VALUES (?, ?, ?)',
+        'INSERT INTO codigosrecuperacion (correo, codigo, fecha_expiracion) VALUES (?, ?, ?)',
         [correo, codigo, fechaExpiracion]
       );
 
@@ -103,7 +103,7 @@ export const validateRecoveryCode = async (req, res) => {
 
     // Buscar código válido y no expirado
     const [codes] = await pool.query(
-      `SELECT * FROM CodigosRecuperacion 
+      `SELECT * FROM codigosrecuperacion 
        WHERE correo = ? 
          AND codigo = ? 
          AND usado = FALSE 
@@ -160,7 +160,7 @@ export const resetPassword = async (req, res) => {
 
     // Verificar código válido y no expirado
     const [codes] = await connection.query(
-      `SELECT * FROM CodigosRecuperacion 
+      `SELECT * FROM codigosrecuperacion
        WHERE correo = ? 
          AND codigo = ? 
          AND usado = FALSE 
@@ -197,7 +197,7 @@ export const resetPassword = async (req, res) => {
 
     // 🔒 Invalidar TODOS los códigos del usuario (no solo el usado)
     await connection.query(
-      'UPDATE CodigosRecuperacion SET usado = TRUE WHERE correo = ?',
+      'UPDATE codigosrecuperacion SET usado = TRUE WHERE correo = ?',
       [correo]
     );
 
@@ -225,7 +225,7 @@ export const resetPassword = async (req, res) => {
 export const cleanupExpiredCodes = async () => {
   try {
     const [result] = await pool.query(
-      'DELETE FROM CodigosRecuperacion WHERE fecha_expiracion < NOW() OR usado = TRUE'
+      'DELETE FROM codigosrecuperacion WHERE fecha_expiracion < NOW() OR usado = TRUE'
     );
     console.log(`🧹 Códigos eliminados: ${result.affectedRows}`);
   } catch (error) {
