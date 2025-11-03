@@ -25,31 +25,92 @@ export const generateCode = () => {
 };
 
 // =========================================================
-// 📧 ENVIAR CORREO CON BREVO
+// 📧 ENVIAR CORREO DE RECUPERACIÓN CON BREVO
 // =========================================================
 export const sendRecoveryCode = async (email, code) => {
   try {
     const sendSmtpEmail = {
-      sender: { name: 'NU-B Studio', email: 'noreply@nubstudio.com' },
+      sender: {
+        name: 'NubStudio', // Nombre que verá el usuario
+        email: 'gustavotubazo@gmail.com', // Remitente verificado en Brevo ✅
+      },
       to: [{ email }],
       subject: '🔑 Recuperación de contraseña - NU-B Studio',
       htmlContent: `
-        <div style="font-family: sans-serif; max-width: 600px; margin: auto; border: 1px solid #eee; border-radius: 10px;">
-          <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 25px; text-align: center;">
-            <h1>Recuperación de contraseña</h1>
-          </div>
-          <div style="padding: 30px; text-align: center;">
-            <p>Hemos recibido una solicitud para restablecer tu contraseña.</p>
-            <p>Tu código de recuperación es:</p>
-            <div style="font-size: 28px; font-weight: bold; color: #667eea; margin: 20px 0;">
-              ${code}
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8" />
+          <style>
+            body {
+              font-family: 'Segoe UI', Roboto, sans-serif;
+              background-color: #f4f4f4;
+              margin: 0;
+              padding: 0;
+            }
+            .container {
+              max-width: 600px;
+              margin: 50px auto;
+              background: #ffffff;
+              border-radius: 12px;
+              overflow: hidden;
+              box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            }
+            .header {
+              background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+              color: white;
+              padding: 30px;
+              text-align: center;
+            }
+            .header h1 {
+              margin: 0;
+              font-size: 26px;
+            }
+            .content {
+              padding: 40px 30px;
+              text-align: center;
+              color: #333;
+            }
+            .code-box {
+              background: #eef2ff;
+              border: 2px solid #667eea;
+              border-radius: 10px;
+              padding: 20px;
+              margin: 25px 0;
+              font-size: 32px;
+              font-weight: bold;
+              color: #4c51bf;
+              letter-spacing: 4px;
+              font-family: 'Courier New', monospace;
+            }
+            .footer {
+              background: #f8f9fa;
+              padding: 15px;
+              text-align: center;
+              font-size: 13px;
+              color: #666;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h1>Recuperación de Contraseña</h1>
             </div>
-            <p>Este código expira en 15 minutos.</p>
+            <div class="content">
+              <p>Hola,</p>
+              <p>Hemos recibido una solicitud para restablecer tu contraseña.</p>
+              <p>Tu código de recuperación es:</p>
+              <div class="code-box">${code}</div>
+              <p>Este código expirará en <strong>15 minutos</strong>.</p>
+              <p style="font-size: 13px; color: #777;">Si no solicitaste este cambio, ignora este mensaje.</p>
+            </div>
+            <div class="footer">
+              © ${new Date().getFullYear()} NubStudio — No respondas a este mensaje.
+            </div>
           </div>
-          <div style="background: #f8f9fa; padding: 20px; font-size: 13px; color: #666; text-align: center;">
-            © ${new Date().getFullYear()} NU-B Studio — No respondas a este mensaje.
-          </div>
-        </div>
+        </body>
+        </html>
       `,
     };
 
