@@ -1,13 +1,8 @@
-import { Resend } from 'resend';
+import * as brevo from '@getbrevo/brevo';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 
 dotenv.config();
-
-// =========================================================
-// ✉️ CONFIGURAR RESEND
-// =========================================================
-const resend = new Resend(process.env.RESEND_API_KEY);
 
 // =========================================================
 // 🔐 GENERAR CÓDIGO DE RECUPERACIÓN
@@ -21,43 +16,36 @@ export const generateCode = () => {
 };
 
 // =========================================================
-// 📧 ENVIAR CORREO DE RECUPERACIÓN
+// 📧 ENVIAR CORREO CON BREVO (SMTP/API)
 // =========================================================
 export const sendRecoveryCode = async (email, code) => {
   try {
-    const { data, error } = await resend.emails.send({
-      from: 'NU-B Studio <noreply@resend.dev>', // ✅ nombre de remitente
-      to: [email],
+    const apiInstance = new brevo.TransactionalEmailsApi();
+    apiInstance.setApiKey(
+      brevo.TransactionalEmailsApiApiKeys.apiKey,
+      process.env.BREVO_API_KEY
+    );
+
+    const sendSmtpEmail = {
+      sender: { name: 'NU-B Studio', email: 'noreply@nubstudio.com' },
+      to: [{ email }],
       subject: '🔑 Recuperación de contraseña - NU-B Studio',
-      html: `
-        <div style="font-family: sans-serif; max-width: 600px; margin: auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
-          <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 25px; text-align: center;">
-            <h1>Recuperación de contraseña</h1>
-          </div>
-          <div style="padding: 30px; text-align: center;">
-            <p>Hemos recibido una solicitud para restablecer tu contraseña.</p>
-            <p>Tu código de recuperación es:</p>
-            <div style="font-size: 28px; font-weight: bold; color: #667eea; margin: 20px 0;">
-              ${code}
-            </div>
-            <p>Este código expira en 15 minutos.</p>
-          </div>
-          <div style="background: #f8f9fa; padding: 20px; font-size: 13px; color: #666; text-align: center;">
-            © ${new Date().getFullYear()} NU-B Studio — No respondas a este mensaje.
-          </div>
+      htmlContent: `
+        <div style="font-family:sans-serif;max-width:600px;margin:auto;padding:25px;background:#fff;border-radius:8px;border:1px solid #eee;">
+          <h2 style="color:#5b3cc4;text-align:center;">Recuperación de contraseña</h2>
+          <p style="text-align:center;color:#333;">Usa este código para restablecer tu contraseña:</p>
+          <div style="text-align:center;margin:20px 0;font-size:28px;font-weight:bold;color:#5b3cc4;">${code}</div>
+          <p style="text-align:center;color:#777;">Este código expira en 15 minutos.</p>
+          <p style="text-align:center;font-size:12px;color:#999;">© ${new Date().getFullYear()} NU-B Studio. No respondas a este mensaje.</p>
         </div>
       `,
-    });
+    };
 
-    if (error) {
-      console.error('❌ Error de Resend:', error);
-      throw new Error(error.message);
-    }
-
-    console.log('✅ Email enviado correctamente:', data);
+    const result = await apiInstance.sendTransacEmail(sendSmtpEmail);
+    console.log('✅ Email enviado correctamente:', result.messageId);
     return { success: true };
   } catch (error) {
-    console.error('❌ Error al enviar email:', error);
+    console.error('❌ Error al enviar email con Brevo:', error.message);
     throw new Error('Error al enviar el código por correo');
   }
 };

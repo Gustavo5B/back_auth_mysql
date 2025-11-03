@@ -8,10 +8,11 @@
     "dev": "nodemon src/server.js"
   },
   "keywords": [],
-  "author": "",
+  "author": "NU-B Studio",
   "license": "ISC",
-  "description": "",
+  "description": "Backend de autenticación con recuperación y 2FA para NU-B Studio",
   "dependencies": {
+    "@getbrevo/brevo": "^1.0.0",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
@@ -20,9 +21,11 @@
     "mysql2": "^3.15.3",
     "node-cron": "^4.2.1",
     "nodemailer": "^7.0.10",
-    "nodemon": "^3.1.10",
     "qrcode": "^1.5.4",
     "resend": "^6.4.0",
     "speakeasy": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18.x"
   }
 }
