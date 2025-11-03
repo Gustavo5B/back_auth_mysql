@@ -1,7 +1,16 @@
-import nodemailer from 'nodemailer';
+import brevo from '@getbrevo/brevo';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 dotenv.config();
+
+// =========================================================
+// ✉️ CONFIGURACIÓN DE BREVO (usando API key HTTPS, no SMTP)
+// =========================================================
+const defaultClient = brevo.ApiClient.instance;
+const apiKey = defaultClient.authentications['api-key'];
+apiKey.apiKey = process.env.BREVO_API_KEY;
+
+const apiInstance = new brevo.TransactionalEmailsApi();
 
 // =========================================================
 // 🔐 GENERAR CÓDIGO DE RECUPERACIÓN
@@ -15,54 +24,103 @@ export const generateCode = () => {
 };
 
 // =========================================================
-// ✉️ CONFIGURAR TRANSPORTADOR SMTP (BREVO)
-// =========================================================
-const transporter = nodemailer.createTransport({
-  host: 'smtp-relay.brevo.com',
-  port: 587,
-  auth: {
-    user: '9aa523001@smtp-brevo.com', // tu usuario SMTP (lo ves en Brevo)
-    pass: process.env.BREVO_API_KEY, // usa aquí tu xsmtpsib-... key
-  },
-});
-
-// =========================================================
-// 📧 ENVIAR CORREO CON SMTP
+// 📧 ENVIAR CORREO CON BREVO API
 // =========================================================
 export const sendRecoveryCode = async (email, code) => {
   try {
-    const html = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border-radius: 10px; overflow: hidden;">
-        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 25px; text-align: center;">
-          <h1>Recuperación de contraseña</h1>
-        </div>
-        <div style="padding: 30px; text-align: center;">
-          <p>Tu código de recuperación es:</p>
-          <div style="font-size: 28px; font-weight: bold; color: #667eea; margin: 20px 0;">
-            ${code}
-          </div>
-          <p>Este código expira en 15 minutos.</p>
-        </div>
-        <div style="background: #f8f9fa; padding: 20px; font-size: 13px; color: #666; text-align: center;">
-          © ${new Date().getFullYear()} NubStudio — No respondas a este mensaje.
-        </div>
-      </div>
-    `;
-
-    const mailOptions = {
-      from: '"NubStudio" <gustavotubazo@gmail.com>',
-      to: email,
+    const sendSmtpEmail = {
+      sender: {
+        name: 'NubStudio',
+        email: 'gustavotubazo@gmail.com', // Remitente verificado en Brevo ✅
+      },
+      to: [{ email }],
       subject: '🔑 Recuperación de contraseña - NU-B Studio',
-      html,
+      htmlContent: `
+        <!DOCTYPE html>
+        <html lang="es">
+        <head>
+          <meta charset="UTF-8" />
+          <style>
+            body {
+              font-family: 'Segoe UI', Roboto, sans-serif;
+              background-color: #f9fafb;
+              margin: 0;
+              padding: 0;
+            }
+            .container {
+              max-width: 600px;
+              margin: 40px auto;
+              background: #ffffff;
+              border-radius: 12px;
+              overflow: hidden;
+              box-shadow: 0 6px 14px rgba(0,0,0,0.1);
+            }
+            .header {
+              background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+              color: white;
+              padding: 30px;
+              text-align: center;
+            }
+            .header h1 {
+              margin: 0;
+              font-size: 26px;
+            }
+            .content {
+              padding: 40px 30px;
+              text-align: center;
+              color: #333;
+            }
+            .code-box {
+              background: #eef2ff;
+              border: 2px solid #667eea;
+              border-radius: 10px;
+              padding: 20px;
+              margin: 25px 0;
+              font-size: 32px;
+              font-weight: bold;
+              color: #4c51bf;
+              letter-spacing: 4px;
+              font-family: 'Courier New', monospace;
+            }
+            .footer {
+              background: #f8f9fa;
+              padding: 15px;
+              text-align: center;
+              font-size: 13px;
+              color: #666;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h1>Recuperación de Contraseña</h1>
+            </div>
+            <div class="content">
+              <p>Hola,</p>
+              <p>Hemos recibido una solicitud para restablecer tu contraseña.</p>
+              <p>Tu código de recuperación es:</p>
+              <div class="code-box">${code}</div>
+              <p>Este código expirará en <strong>15 minutos</strong>.</p>
+              <p style="font-size: 13px; color: #777;">Si no solicitaste este cambio, ignora este mensaje.</p>
+            </div>
+            <div class="footer">
+              © ${new Date().getFullYear()} NubStudio — No respondas a este mensaje.
+            </div>
+          </div>
+        </body>
+        </html>
+      `,
     };
 
-    const info = await transporter.sendMail(mailOptions);
-    console.log('✅ Correo enviado:', info.messageId);
-    return { success: true };
+    const result = await apiInstance.sendTransacEmail(sendSmtpEmail);
+    console.log('✅ Email enviado correctamente. ID:', result.messageId);
+    return { success: true, messageId: result.messageId };
 
   } catch (error) {
-    console.error('❌ Error al enviar correo:', error);
-    throw new Error('No se pudo enviar el código por correo');
+    console.error('❌ Error al enviar email con Brevo:', error);
+    console.error('Detalles completos:', error.response?.body || error.message);
+    throw new Error('Error al enviar el código por correo');
   }
 };
 
