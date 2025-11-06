@@ -10,6 +10,9 @@ import recoveryRoutes from './routes/recoveryRoutes.js';
 import twoFactorRoutes from './routes/twoFactorRoutes.js';
 import { testConnection } from './config/db.js';
 import { cleanupExpiredCodes, sendRecoveryCode, generateCode } from './services/emailService.js';
+import gmail2faRoutes from "./routes/gmail2faRoutes.js";
+
+
 
 // =========================================================
 // ⚙️ CONFIGURACIÓN INICIAL
@@ -51,6 +54,9 @@ app.use(express.json());
 app.use('/api/auth', authRoutes);
 app.use('/api/recovery', recoveryRoutes);
 app.use('/api/2fa', twoFactorRoutes);
+app.use("/api/gmail-2fa", gmail2faRoutes);
+app.use('/api/gmail2fa', gmail2faRoutes); 
+
 
 // =========================================================
 // 🧪 RUTA DE PRUEBA DEL SERVIDOR

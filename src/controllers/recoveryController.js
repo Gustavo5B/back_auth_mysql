@@ -82,12 +82,20 @@ export const requestRecoveryCode = async (req, res) => {
       fechaExpiracion.setMinutes(fechaExpiracion.getMinutes() + 15);
 
       // Insertar código con reintentos
+     // await retryOperation(() =>
+       // connection.query(
+         // 'INSERT INTO codigosrecuperacion (correo, codigo, fecha_expiracion) VALUES (?, ?, ?)',
+          //[correo, codigo, fechaExpiracion]
+        //)
+      //);
       await retryOperation(() =>
-        connection.query(
-          'INSERT INTO codigosrecuperacion (correo, codigo, fecha_expiracion) VALUES (?, ?, ?)',
-          [correo, codigo, fechaExpiracion]
-        )
-      );
+  connection.query(
+    `INSERT INTO codigosrecuperacion (correo, codigo, fecha_expiracion)
+     VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 15 MINUTE))`,
+    [correo, codigo]
+  )
+);
+
 
       // Enviar email
       try {
