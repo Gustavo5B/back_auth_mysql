@@ -2,7 +2,7 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
 import dotenv from "dotenv";
 import { pool } from "../config/db.js";
-import { generateCode, sendRecoveryCode } from "../services/emailService.js";
+import { generateCode, sendRecoveryCode, sendWelcomeEmail} from "../services/emailService.js";
 
 dotenv.config();
 
@@ -21,6 +21,93 @@ const generateToken = (user) => {
     process.env.JWT_SECRET,
     { expiresIn: "24h" }
   );
+};
+// =========================================================
+// 📝 REGISTRO DE USUARIO CON EMAIL DE BIENVENIDA
+// =========================================================
+export const register = async (req, res) => {
+  const { nombre, correo, contrasena } = req.body;
+
+  try {
+    // Validaciones básicas
+    if (!nombre || !correo || !contrasena) {
+      return res.status(400).json({ 
+        message: "Todos los campos son obligatorios" 
+      });
+    }
+
+    if (contrasena.length < 8) {
+      return res.status(400).json({ 
+        message: "La contraseña debe tener al menos 8 caracteres" 
+      });
+    }
+
+    // Validar formato de email
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(correo)) {
+      return res.status(400).json({ 
+        message: "El formato del correo no es válido" 
+      });
+    }
+
+    // 🔹 Verificar si el correo ya existe
+    const [existingUser] = await pool.query(
+      "SELECT * FROM Usuarios WHERE correo = ?",
+      [correo]
+    );
+
+    if (existingUser.length > 0) {
+      return res.status(400).json({ 
+        message: "El correo ya está registrado." 
+      });
+    }
+
+    // 🔹 Encriptar contraseña
+    const hash = await bcrypt.hash(contrasena, 10);
+
+    // 🔹 Insertar nuevo usuario
+    const [result] = await pool.query(
+      "INSERT INTO Usuarios (nombre, correo, contrasena, estado) VALUES (?, ?, ?, ?)",
+      [nombre, correo, hash, "Activo"]
+    );
+
+    console.log(`✅ Usuario registrado: ${correo} (ID: ${result.insertId})`);
+
+    // 🔹 ENVIAR EMAIL DE BIENVENIDA DE FORMA ASÍNCRONA
+    // No bloqueamos la respuesta si falla el email
+    sendWelcomeEmail(correo, nombre)
+      .then(() => {
+        console.log(`📧 Email de bienvenida enviado a: ${correo}`);
+      })
+      .catch((emailError) => {
+        console.error(`⚠️ No se pudo enviar email a ${correo}:`, emailError.message);
+      });
+
+    // Responder inmediatamente al cliente
+    res.status(201).json({ 
+      message: "Usuario registrado exitosamente ✅",
+      user: {
+        id: result.insertId,
+        nombre,
+        correo
+      }
+    });
+
+  } catch (error) {
+    console.error("❌ Error en registro:", error);
+    
+    // Manejo específico de errores
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(400).json({ 
+        message: "El correo ya está registrado." 
+      });
+    }
+
+    res.status(500).json({ 
+      message: "Error al registrar usuario.",
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
 };
 
 export const login = async (req, res) => {
@@ -51,11 +138,22 @@ export const login = async (req, res) => {
     const match = await bcrypt.compare(contrasena, user.contrasena);
     console.log('🔐 Match:', match);
     
-    if (!match)
-      return res.status(401).json({ message: "Contraseña incorrecta." });
+    // Después de esta línea:
+if (!match)
+  return res.status(401).json({ message: "Contraseña incorrecta." });
 
-    if (user.estado !== "Activo")
-      return res.status(403).json({ message: "Cuenta inactiva o suspendida." });
+// AGREGAR ESTA VALIDACIÓN:
+if (user.estado !== "Activo") {
+  if (user.estado === "Pendiente") {
+    return res.status(403).json({ 
+      message: "Cuenta pendiente de verificación. Revisa tu correo 📧",
+      requiresVerification: true,
+      correo: user.correo
+    });
+  }
+  return res.status(403).json({ message: "Cuenta inactiva o suspendida." });
+}
+
 
     // ✅ Verificar si tiene Gmail-2FA activo
     if (user.metodo_gmail_2fa) {
