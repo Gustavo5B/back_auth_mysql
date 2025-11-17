@@ -7,6 +7,51 @@ import { sendVerificationEmail } from "../services/emailService.js";
 dotenv.config();
 
 // =========================================================
+// 📍 OBTENER IP REAL DEL USUARIO (RENDER + VERCEL)
+// =========================================================
+const getClientIP = (req) => {
+  const forwarded = req.headers['x-forwarded-for'];
+  
+  if (forwarded) {
+    return forwarded.split(',')[0].trim();
+  }
+  
+  return req.headers['x-real-ip'] || 
+         req.connection.remoteAddress || 
+         req.socket.remoteAddress ||
+         req.ip ||
+         'IP no disponible';
+};
+
+// =========================================================
+// 🕐 OBTENER FECHA/HORA EN ZONA HORARIA DE MÉXICO
+// =========================================================
+const getMexicoDateTime = () => {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Mexico_City',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+
+  const parts = formatter.formatToParts();
+
+  let year = parts.find(p => p.type === 'year').value;
+  let month = parts.find(p => p.type === 'month').value;
+  let day = parts.find(p => p.type === 'day').value;
+  let hour = parts.find(p => p.type === 'hour').value;
+  let minute = parts.find(p => p.type === 'minute').value;
+  let second = parts.find(p => p.type === 'second').value;
+
+  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+};
+
+
+// =========================================================
 // 🔢 GENERAR CÓDIGO DE VERIFICACIÓN DE 6 DÍGITOS
 // =========================================================
 const generateVerificationCode = () => {
@@ -17,18 +62,16 @@ const generateVerificationCode = () => {
 // 🛡️ SANITIZAR NOMBRE (Protección contra XSS)
 // =========================================================
 const sanitizeName = (nombre) => {
-  // Remover caracteres peligrosos
   return nombre
     .trim()
-    .replace(/[<>\"'`]/g, '') // Eliminar caracteres HTML/JS peligrosos
-    .substring(0, 100); // Limitar longitud
+    .replace(/[<>\"'`]/g, '')
+    .substring(0, 100);
 };
 
 // =========================================================
 // 🔐 VALIDAR FORMATO DE NOMBRE
 // =========================================================
 const isValidName = (nombre) => {
-  // Solo letras, espacios, acentos y ñ
   const nameRegex = /^[a-zA-ZáéíóúÁÉÍÓÚñÑ\s]+$/;
   return nameRegex.test(nombre) && nombre.length >= 2 && nombre.length <= 100;
 };
@@ -59,7 +102,6 @@ const validatePasswordStrength = (password) => {
     errors.push('Debe contener al menos un carácter especial (@$!%*?&#)');
   }
 
-  // Lista de contraseñas comunes (top 20)
   const commonPasswords = [
     '12345678', 'password', 'qwerty123', '123456789', 'abc123',
     'password123', '11111111', 'qwertyuiop', 'password1', 'admin123',
@@ -83,10 +125,10 @@ const isValidEmail = (email) => {
 };
 
 // =========================================================
-// 📝 REGISTRO DE USUARIO CON VERIFICACIÓN DE EMAIL
+// 📝 REGISTRO DE USUARIO CON VERIFICACIÓN DE EMAIL Y TÉRMINOS
 // =========================================================
 export const register = async (req, res) => {
-  let { nombre, correo, contrasena } = req.body;
+  let { nombre, correo, contrasena, aceptoTerminos } = req.body;
 
   try {
     console.log('📝 Iniciando registro para:', correo);
@@ -97,6 +139,15 @@ export const register = async (req, res) => {
     if (!nombre || !correo || !contrasena) {
       return res.status(400).json({ 
         message: "Todos los campos son obligatorios" 
+      });
+    }
+
+    // ============================================
+    // ✅ VALIDAR ACEPTACIÓN DE TÉRMINOS
+    // ============================================
+    if (!aceptoTerminos || aceptoTerminos !== true) {
+      return res.status(400).json({ 
+        message: "Debes aceptar los Términos y Condiciones para continuar" 
       });
     }
 
@@ -153,7 +204,7 @@ export const register = async (req, res) => {
     // 6️⃣ ENCRIPTAR CONTRASEÑA
     // ============================================
     console.log('🔐 Encriptando contraseña...');
-    const saltRounds = 12; // Mayor que 10 para más seguridad
+    const saltRounds = 12;
     const hash = await bcrypt.hash(contrasena, saltRounds);
 
     // ============================================
@@ -165,14 +216,24 @@ export const register = async (req, res) => {
     console.log('🔢 Código generado:', codigoVerificacion);
 
     // ============================================
-    // 8️⃣ INSERTAR USUARIO CON PREPARED STATEMENT
+    // 📍 OBTENER IP Y FECHA/HORA DE MÉXICO
+    // ============================================
+    const ipUsuario = getClientIP(req);
+    const fechaAceptacion = getMexicoDateTime();
+
+    console.log('📍 IP del usuario:', ipUsuario);
+    console.log('🕐 Fecha/hora de aceptación:', fechaAceptacion);
+
+    // ============================================
+    // 8️⃣ INSERTAR USUARIO CON TÉRMINOS ACEPTADOS
     // ============================================
     console.log('💾 Guardando usuario en BD con estado Pendiente...');
     
     const insertQuery = `
       INSERT INTO Usuarios 
-      (nombre, correo, contrasena, estado, codigo_verificacion, expiracion_codigo_verificacion) 
-      VALUES (?, ?, ?, ?, ?, ?)
+      (nombre, correo, contrasena, estado, codigo_verificacion, expiracion_codigo_verificacion,
+       acepto_terminos, fecha_aceptacion_terminos, version_terminos_aceptada, ip_aceptacion) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     
     const [result] = await pool.query(insertQuery, [
@@ -181,10 +242,15 @@ export const register = async (req, res) => {
       hash,
       "Pendiente",
       codigoVerificacion,
-      expiracion
+      expiracion,
+      true,                    // acepto_terminos
+      fechaAceptacion,         // ✅ Fecha/hora de México
+      '1.0',                   // version_terminos_aceptada
+      ipUsuario                // ✅ IP real del cliente
     ]);
 
     console.log(`✅ Usuario registrado (Pendiente): ${correo} (ID: ${result.insertId})`);
+    console.log(`📋 Términos aceptados: v1.0 desde IP: ${ipUsuario} a las ${fechaAceptacion}`);
 
     // ============================================
     // 9️⃣ ENVIAR EMAIL DE VERIFICACIÓN
@@ -216,7 +282,11 @@ export const register = async (req, res) => {
       user: {
         id: result.insertId,
         nombre,
-        correo
+        correo,
+        terminos_aceptados: true,
+        version_terminos: '1.0',
+        fecha_aceptacion: fechaAceptacion,
+        ip_registro: ipUsuario
       }
     });
 
@@ -244,25 +314,21 @@ export const verifyEmail = async (req, res) => {
 
     console.log('🔍 Verificando código para:', correo);
 
-    // Validaciones
     if (!correo || !codigo) {
       return res.status(400).json({ 
         message: "Correo y código son obligatorios" 
       });
     }
 
-    // Sanitizar inputs
     correo = correo.trim().toLowerCase();
     codigo = codigo.trim();
 
-    // Validar formato de código
     if (!/^\d{6}$/.test(codigo)) {
       return res.status(400).json({ 
         message: "Código inválido. Debe ser de 6 dígitos" 
       });
     }
 
-    // Buscar usuario pendiente
     const selectQuery = `
       SELECT id_usuario, nombre, codigo_verificacion, expiracion_codigo_verificacion 
       FROM Usuarios 
@@ -280,7 +346,6 @@ export const verifyEmail = async (req, res) => {
 
     const user = rows[0];
 
-    // Verificar código
     if (user.codigo_verificacion !== codigo) {
       console.log('❌ Código incorrecto');
       return res.status(401).json({ 
@@ -288,7 +353,6 @@ export const verifyEmail = async (req, res) => {
       });
     }
 
-    // Verificar expiración
     const now = new Date();
     const expiracion = new Date(user.expiracion_codigo_verificacion);
     
@@ -299,7 +363,6 @@ export const verifyEmail = async (req, res) => {
       });
     }
 
-    // Activar cuenta
     const updateQuery = `
       UPDATE Usuarios 
       SET estado = ?, 
@@ -312,7 +375,6 @@ export const verifyEmail = async (req, res) => {
 
     console.log(`✅ Cuenta verificada exitosamente: ${correo}`);
 
-    // Enviar email de bienvenida
     const { sendWelcomeEmail } = await import('../services/emailService.js');
     sendWelcomeEmail(correo, user.nombre)
       .then(() => console.log('📧 Email de bienvenida enviado'))
@@ -346,10 +408,8 @@ export const resendVerificationCode = async (req, res) => {
       });
     }
 
-    // Sanitizar email
     correo = correo.trim().toLowerCase();
 
-    // Buscar usuario pendiente
     const selectQuery = `
       SELECT id_usuario, nombre 
       FROM Usuarios 
@@ -367,11 +427,9 @@ export const resendVerificationCode = async (req, res) => {
 
     const user = rows[0];
 
-    // Generar nuevo código
     const nuevoCodigoVerificacion = generateVerificationCode();
     const nuevaExpiracion = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-    // Actualizar en BD
     const updateQuery = `
       UPDATE Usuarios 
       SET codigo_verificacion = ?, 
@@ -385,7 +443,6 @@ export const resendVerificationCode = async (req, res) => {
       user.id_usuario
     ]);
 
-    // Enviar email
     const { sendVerificationEmail } = await import('../services/emailService.js');
     await sendVerificationEmail(correo, user.nombre, nuevoCodigoVerificacion);
 
