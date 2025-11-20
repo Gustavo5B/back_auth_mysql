@@ -2,7 +2,7 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
 import dotenv from "dotenv";
 import { pool } from "../config/db.js";
-import { generateCode, sendRecoveryCode, sendWelcomeEmail} from "../services/emailService.js";
+import { generateCode, sendRecoveryCode, sendWelcomeEmail } from "../services/emailService.js";
 
 dotenv.config();
 
@@ -22,6 +22,31 @@ const generateToken = (user) => {
     { expiresIn: "24h" }
   );
 };
+
+// =========================================================
+// 🔒 HELPER: Calcular tiempo de bloqueo progresivo
+// =========================================================
+const calcularTiempoBloqueo = (bloqueosTotales) => {
+  if (bloqueosTotales === 0) return 15;      // 15 minutos (primer bloqueo)
+  if (bloqueosTotales === 1) return 30;      // 30 minutos (segundo bloqueo)
+  return 60;                                  // 60 minutos (tercer bloqueo en adelante)
+};
+
+// =========================================================
+// 📊 HELPER: Registrar en historial (OPCIONAL)
+// =========================================================
+const registrarHistorialLogin = async (usuario, tipo, razon = null) => {
+  try {
+    await pool.query(
+      `INSERT INTO Historial_Login (id_usuario, correo, tipo, razon_fallo) 
+       VALUES (?, ?, ?, ?)`,
+      [usuario?.id_usuario || null, usuario?.correo || 'desconocido', tipo, razon]
+    );
+  } catch (error) {
+    console.error('⚠️ Error al registrar historial:', error.message);
+  }
+};
+
 // =========================================================
 // 📝 REGISTRO DE USUARIO CON EMAIL DE BIENVENIDA
 // =========================================================
@@ -50,7 +75,7 @@ export const register = async (req, res) => {
       });
     }
 
-    // 🔹 Verificar si el correo ya existe
+    // Verificar si el correo ya existe
     const [existingUser] = await pool.query(
       "SELECT * FROM Usuarios WHERE correo = ?",
       [correo]
@@ -62,10 +87,10 @@ export const register = async (req, res) => {
       });
     }
 
-    // 🔹 Encriptar contraseña
+    // Encriptar contraseña
     const hash = await bcrypt.hash(contrasena, 10);
 
-    // 🔹 Insertar nuevo usuario
+    // Insertar nuevo usuario
     const [result] = await pool.query(
       "INSERT INTO Usuarios (nombre, correo, contrasena, estado) VALUES (?, ?, ?, ?)",
       [nombre, correo, hash, "Activo"]
@@ -73,8 +98,7 @@ export const register = async (req, res) => {
 
     console.log(`✅ Usuario registrado: ${correo} (ID: ${result.insertId})`);
 
-    // 🔹 ENVIAR EMAIL DE BIENVENIDA DE FORMA ASÍNCRONA
-    // No bloqueamos la respuesta si falla el email
+    // ENVIAR EMAIL DE BIENVENIDA DE FORMA ASÍNCRONA
     sendWelcomeEmail(correo, nombre)
       .then(() => {
         console.log(`📧 Email de bienvenida enviado a: ${correo}`);
@@ -96,7 +120,6 @@ export const register = async (req, res) => {
   } catch (error) {
     console.error("❌ Error en registro:", error);
     
-    // Manejo específico de errores
     if (error.code === 'ER_DUP_ENTRY') {
       return res.status(400).json({ 
         message: "El correo ya está registrado." 
@@ -110,52 +133,168 @@ export const register = async (req, res) => {
   }
 };
 
+// =========================================================
+// 🔐 LOGIN CON BLOQUEO POR INTENTOS FALLIDOS
+// =========================================================
 export const login = async (req, res) => {
   try {
     const { correo, contrasena } = req.body;
 
     console.log('📥 Login attempt:', { correo, hasPassword: !!contrasena });
 
+    // ============================================
+    // 1️⃣ VALIDACIONES BÁSICAS
+    // ============================================
     if (!correo || !contrasena) {
       return res.status(400).json({ message: "Correo y contraseña son obligatorios." });
     }
 
+    // ============================================
+    // 2️⃣ BUSCAR USUARIO
+    // ============================================
     console.log('🔍 Buscando usuario en BD...');
     const [rows] = await pool.query(
       "SELECT * FROM Usuarios WHERE correo = ?",
       [correo]
     );
 
-    console.log('📊 Resultados:', rows.length, 'usuario(s) encontrado(s)');
-
-    if (rows.length === 0)
+    if (rows.length === 0) {
+      console.log('❌ Usuario no encontrado:', correo);
       return res.status(404).json({ message: "Usuario no encontrado." });
+    }
 
     const user = rows[0];
-    console.log('👤 Usuario encontrado:', user.correo, '| 2FA habilitado:', user.esta_2fa_habilitado);
+    console.log('👤 Usuario encontrado:', user.correo);
 
+    // ============================================
+    // 3️⃣ VERIFICAR SI ESTÁ BLOQUEADO
+    // ============================================
+    if (user.bloqueado_hasta) {
+      const ahora = new Date();
+      const desbloqueo = new Date(user.bloqueado_hasta);
+
+      if (ahora < desbloqueo) {
+        // 🔒 AÚN ESTÁ BLOQUEADO
+        const minutosRestantes = Math.ceil((desbloqueo - ahora) / 60000);
+        const horaDesbloqueo = desbloqueo.toLocaleTimeString('es-MX', {
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+
+        console.log(`🔒 Cuenta bloqueada hasta: ${horaDesbloqueo}`);
+
+        await registrarHistorialLogin(user, 'bloqueado', 'Intento durante bloqueo');
+
+        return res.status(403).json({
+          blocked: true,
+          message: `🔒 Cuenta bloqueada por seguridad. Intenta de nuevo en ${minutosRestantes} minuto${minutosRestantes > 1 ? 's' : ''}.`,
+          minutesRemaining: minutosRestantes,
+          unlockTime: horaDesbloqueo
+        });
+      } else {
+        // ✅ DESBLOQUEO AUTOMÁTICO
+        console.log('✅ Desbloqueando cuenta automáticamente...');
+        await pool.query(
+          `UPDATE Usuarios 
+           SET bloqueado_hasta = NULL, 
+               intentos_login_fallidos = 0 
+           WHERE id_usuario = ?`,
+          [user.id_usuario]
+        );
+        user.bloqueado_hasta = null;
+        user.intentos_login_fallidos = 0;
+      }
+    }
+
+    // ============================================
+    // 4️⃣ VALIDAR CONTRASEÑA
+    // ============================================
     console.log('🔐 Verificando contraseña...');
     const match = await bcrypt.compare(contrasena, user.contrasena);
-    console.log('🔐 Match:', match);
-    
-    // Después de esta línea:
-if (!match)
-  return res.status(401).json({ message: "Contraseña incorrecta." });
 
-// AGREGAR ESTA VALIDACIÓN:
-if (user.estado !== "Activo") {
-  if (user.estado === "Pendiente") {
-    return res.status(403).json({ 
-      message: "Cuenta pendiente de verificación. Revisa tu correo 📧",
-      requiresVerification: true,
-      correo: user.correo
-    });
-  }
-  return res.status(403).json({ message: "Cuenta inactiva o suspendida." });
-}
+    if (!match) {
+      // ❌ CONTRASEÑA INCORRECTA
+      console.log('❌ Contraseña incorrecta');
 
+      const nuevoIntentos = user.intentos_login_fallidos + 1;
+      console.log(`⚠️ Intento fallido #${nuevoIntentos}`);
 
-    // ✅ Verificar si tiene Gmail-2FA activo
+      if (nuevoIntentos >= 3) {
+        // 🔒 BLOQUEAR CUENTA
+        const tiempoBloqueo = calcularTiempoBloqueo(user.bloqueos_totales);
+
+        await pool.query(
+          `UPDATE Usuarios 
+           SET intentos_login_fallidos = ?,
+               bloqueado_hasta = DATE_ADD(NOW(), INTERVAL ? MINUTE),
+               bloqueos_totales = bloqueos_totales + 1,
+               ultimo_intento_fallido = NOW()
+           WHERE id_usuario = ?`,
+          [nuevoIntentos, tiempoBloqueo, user.id_usuario]
+        );
+
+        await registrarHistorialLogin(user, 'bloqueado', `Bloqueado por ${tiempoBloqueo} minutos`);
+
+        console.log(`🔒 Cuenta bloqueada por ${tiempoBloqueo} minutos`);
+
+        return res.status(403).json({
+          blocked: true,
+          message: `🔒 Cuenta bloqueada por ${tiempoBloqueo} minutos debido a múltiples intentos fallidos.`,
+          minutesBlocked: tiempoBloqueo,
+          attempts: nuevoIntentos
+        });
+      } else {
+        // ⚠️ SOLO INCREMENTAR CONTADOR
+        await pool.query(
+          `UPDATE Usuarios 
+           SET intentos_login_fallidos = ?,
+               ultimo_intento_fallido = NOW()
+           WHERE id_usuario = ?`,
+          [nuevoIntentos, user.id_usuario]
+        );
+
+        await registrarHistorialLogin(user, 'fallido', `Intento ${nuevoIntentos}/3`);
+
+        const intentosRestantes = 3 - nuevoIntentos;
+
+        return res.status(401).json({
+          message: `❌ Contraseña incorrecta. Te ${intentosRestantes === 1 ? 'queda' : 'quedan'} ${intentosRestantes} intento${intentosRestantes > 1 ? 's' : ''}.`,
+          attemptsRemaining: intentosRestantes,
+          totalAttempts: nuevoIntentos
+        });
+      }
+    }
+
+    // ============================================
+    // 5️⃣ CONTRASEÑA CORRECTA - RESETEAR INTENTOS
+    // ============================================
+    console.log('✅ Contraseña correcta');
+
+    if (user.intentos_login_fallidos > 0) {
+      await pool.query(
+        'UPDATE Usuarios SET intentos_login_fallidos = 0 WHERE id_usuario = ?',
+        [user.id_usuario]
+      );
+      console.log('✅ Contador de intentos reseteado');
+    }
+
+    // ============================================
+    // 6️⃣ VALIDAR ESTADO DE LA CUENTA
+    // ============================================
+    if (user.estado !== "Activo") {
+      if (user.estado === "Pendiente") {
+        return res.status(403).json({
+          message: "Cuenta pendiente de verificación. Revisa tu correo 📧",
+          requiresVerification: true,
+          correo: user.correo
+        });
+      }
+      return res.status(403).json({ message: "Cuenta inactiva o suspendida." });
+    }
+
+    // ============================================
+    // 7️⃣ VERIFICAR 2FA (GMAIL)
+    // ============================================
     if (user.metodo_gmail_2fa) {
       console.log('✅ Requiere Gmail-2FA');
       const code = generateCode();
@@ -164,6 +303,9 @@ if (user.estado !== "Activo") {
         [code, user.id_usuario]
       );
       await sendRecoveryCode(user.correo, code);
+
+      await registrarHistorialLogin(user, 'exitoso', '2FA Gmail enviado');
+
       return res.json({
         message: "Se envió un código de acceso a tu correo 📧",
         requires2FA: true,
@@ -172,9 +314,14 @@ if (user.estado !== "Activo") {
       });
     }
 
-    // ✅ Verificar si tiene 2FA habilitado
+    // ============================================
+    // 8️⃣ VERIFICAR 2FA (TOTP)
+    // ============================================
     if (user.esta_2fa_habilitado) {
-      console.log('✅ Requiere 2FA');
+      console.log('✅ Requiere 2FA TOTP');
+
+      await registrarHistorialLogin(user, 'exitoso', '2FA TOTP requerido');
+
       return res.json({
         message: "Credenciales correctas",
         requires2FA: true,
@@ -183,13 +330,19 @@ if (user.estado !== "Activo") {
       });
     }
 
+    // ============================================
+    // 9️⃣ LOGIN EXITOSO SIN 2FA
+    // ============================================
     console.log('✅ Generando token JWT...');
-    const token = generateToken(user); // ← USAR FUNCIÓN CENTRALIZADA
+    const token = generateToken(user);
+
+    await registrarHistorialLogin(user, 'exitoso', 'Login directo');
 
     console.log('✅ Login exitoso para:', user.correo);
+
     res.json({
       message: "Inicio de sesión exitoso ✅",
-      access_token: token, // ← Cambiar "token" a "access_token"
+      access_token: token,
       token_type: "bearer",
       usuario: {
         id: user.id_usuario,
@@ -198,6 +351,7 @@ if (user.estado !== "Activo") {
         estado: user.estado
       }
     });
+
   } catch (error) {
     console.error("❌ Error en login:", error.message);
     console.error("❌ Stack:", error.stack);
@@ -205,7 +359,9 @@ if (user.estado !== "Activo") {
   }
 };
 
-// ⭐ Login con código 2FA
+// =========================================================
+// ⭐ LOGIN CON CÓDIGO 2FA (TOTP)
+// =========================================================
 export const loginWith2FA = async (req, res) => {
   try {
     const { correo, codigo2fa } = req.body;
@@ -237,11 +393,21 @@ export const loginWith2FA = async (req, res) => {
       return res.status(401).json({ message: "Código 2FA incorrecto ❌" });
     }
 
-    const token = generateToken(user); // ← USAR FUNCIÓN CENTRALIZADA
+    // ✅ Resetear intentos fallidos al hacer login exitoso con 2FA
+    if (user.intentos_login_fallidos > 0) {
+      await pool.query(
+        'UPDATE Usuarios SET intentos_login_fallidos = 0 WHERE id_usuario = ?',
+        [user.id_usuario]
+      );
+    }
+
+    const token = generateToken(user);
+
+    await registrarHistorialLogin(user, 'exitoso', 'Login con 2FA TOTP');
 
     res.json({
       message: "Inicio de sesión exitoso ✅",
-      access_token: token, // ← Cambiar "token" a "access_token"
+      access_token: token,
       token_type: "bearer",
       usuario: {
         id: user.id_usuario,
@@ -256,9 +422,9 @@ export const loginWith2FA = async (req, res) => {
   }
 };
 
-// ===========================================================
-// ✅ Verificación de código Gmail (Email 2FA)
-// ===========================================================
+// =========================================================
+// ✅ VERIFICACIÓN DE CÓDIGO GMAIL (EMAIL 2FA)
+// =========================================================
 export const verifyLoginCode = async (req, res) => {
   try {
     const { correo, codigo } = req.body;
@@ -289,11 +455,21 @@ export const verifyLoginCode = async (req, res) => {
       [user.id_usuario]
     );
 
-    const token = generateToken(user); // ← USAR FUNCIÓN CENTRALIZADA
+    // ✅ Resetear intentos fallidos al hacer login exitoso con Gmail 2FA
+    if (user.intentos_login_fallidos > 0) {
+      await pool.query(
+        'UPDATE Usuarios SET intentos_login_fallidos = 0 WHERE id_usuario = ?',
+        [user.id_usuario]
+      );
+    }
+
+    const token = generateToken(user);
+
+    await registrarHistorialLogin(user, 'exitoso', 'Login con Gmail 2FA');
 
     res.json({
       message: "✅ Verificación exitosa. Sesión iniciada.",
-      access_token: token, // ← Cambiar "token" a "access_token"
+      access_token: token,
       token_type: "bearer",
       usuario: {
         id: user.id_usuario,
