@@ -11,6 +11,7 @@ import twoFactorRoutes from './routes/twoFactorRoutes.js';
 import { testConnection } from './config/db.js';
 import { cleanupExpiredCodes, sendRecoveryCode, generateCode } from './services/emailService.js';
 import gmail2faRoutes from "./routes/gmail2faRoutes.js";
+import { cleanupExpiredSessions } from './services/sessionService.js';
 
 
 
@@ -120,5 +121,17 @@ app.listen(PORT, async () => {
     console.log('🟢 Conexión MySQL verificada correctamente.');
   } catch (error) {
     console.error('❌ Error en la conexión MySQL:', error.message);
+  }
+});
+// =========================================================
+// 🕒 CRON JOB: Limpieza de sesiones antiguas cada día
+// =========================================================
+cron.schedule('0 0 * * *', async () => { // Se ejecuta a medianoche
+  console.log('🧹 Ejecutando limpieza de sesiones antiguas...');
+  try {
+    await cleanupExpiredSessions();
+    console.log('✅ Limpieza de sesiones completada.');
+  } catch (err) {
+    console.error('❌ Error en limpieza de sesiones:', err.message);
   }
 });

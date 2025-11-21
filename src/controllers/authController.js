@@ -3,6 +3,7 @@ import bcrypt from "bcrypt";
 import dotenv from "dotenv";
 import { pool } from "../config/db.js";
 import { generateCode, sendRecoveryCode, sendWelcomeEmail } from "../services/emailService.js";
+import { saveActiveSession, revokeOtherSessions } from '../services/sessionService.js';
 
 dotenv.config();
 
@@ -336,6 +337,9 @@ export const login = async (req, res) => {
     console.log('✅ Generando token JWT...');
     const token = generateToken(user);
 
+    // 💾 GUARDAR SESIÓN ACTIVA
+    await saveActiveSession(user.id_usuario, token, req);
+
     await registrarHistorialLogin(user, 'exitoso', 'Login directo');
 
     console.log('✅ Login exitoso para:', user.correo);
@@ -403,6 +407,9 @@ export const loginWith2FA = async (req, res) => {
 
     const token = generateToken(user);
 
+    // 💾 GUARDAR SESIÓN ACTIVA
+    await saveActiveSession(user.id_usuario, token, req);
+
     await registrarHistorialLogin(user, 'exitoso', 'Login con 2FA TOTP');
 
     res.json({
@@ -465,6 +472,9 @@ export const verifyLoginCode = async (req, res) => {
 
     const token = generateToken(user);
 
+    // 💾 GUARDAR SESIÓN ACTIVA
+    await saveActiveSession(user.id_usuario, token, req);
+
     await registrarHistorialLogin(user, 'exitoso', 'Login con Gmail 2FA');
 
     res.json({
@@ -481,5 +491,30 @@ export const verifyLoginCode = async (req, res) => {
   } catch (error) {
     console.error("❌ Error en verifyLoginCode:", error.message);
     res.status(500).json({ message: "Error interno del servidor" });
+  }
+};
+
+// =========================================================
+// 🔥 REVOCAR OTRAS SESIONES (Cerrar sesión en otros dispositivos)
+// =========================================================
+export const closeOtherSessions = async (req, res) => {
+  try {
+    const userId = req.user.id_usuario; // Viene del middleware authenticateToken
+    const currentToken = req.headers.authorization?.split(' ')[1]; // Token actual
+
+    if (!currentToken) {
+      return res.status(400).json({ message: "No se encontró token actual" });
+    }
+
+    const sessionsRevoked = await revokeOtherSessions(userId, currentToken);
+
+    res.json({
+      message: `✅ Se cerraron ${sessionsRevoked} sesión(es) en otros dispositivos`,
+      sessionsRevoked
+    });
+
+  } catch (error) {
+    console.error("❌ Error al revocar sesiones:", error.message);
+    res.status(500).json({ message: "Error al cerrar otras sesiones" });
   }
 };
