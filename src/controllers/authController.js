@@ -519,3 +519,18 @@ export const closeOtherSessions = async (req, res) => {
     res.status(500).json({ message: "Error al cerrar otras sesiones" });
   }
 };
+// =========================================================
+// ✅ VERIFICAR SI LA SESIÓN ACTUAL ES VÁLIDA
+// =========================================================
+export const checkSession = async (req, res) => {
+  try {
+    // Si llegó aquí, significa que el middleware authenticateToken ya validó todo
+    res.json({
+      valid: true,
+      message: "Sesión válida"
+    });
+  } catch (error) {
+    console.error("❌ Error al verificar sesión:", error.message);
+    res.status(500).json({ message: "Error al verificar sesión" });
+  }
+};
