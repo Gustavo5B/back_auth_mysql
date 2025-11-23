@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import { pool } from "../config/db.js";
 import { generateCode, sendRecoveryCode, sendWelcomeEmail } from "../services/emailService.js";
 import { saveActiveSession, revokeOtherSessions } from '../services/sessionService.js';
-
+import crypto from 'crypto'; // ← Agregar este import al inicio
 dotenv.config();
 
 // =========================================================
@@ -13,11 +13,12 @@ dotenv.config();
 const generateToken = (user) => {
   return jwt.sign(
     {
-      sub: user.correo,              // ← ESTÁNDAR JWT (subject)
-      correo: user.correo,            // ← Tu campo personalizado
-      email: user.correo,             // ← Compatibilidad
+      sub: user.correo,
+      correo: user.correo,
+      email: user.correo,
       id_usuario: user.id_usuario,
-      metodo_gmail_2fa: user.metodo_gmail_2fa || false
+      metodo_gmail_2fa: user.metodo_gmail_2fa || false,
+      jti: crypto.randomUUID() // ← AGREGAR ESTO (JWT ID único)
     },
     process.env.JWT_SECRET,
     { expiresIn: "24h" }
