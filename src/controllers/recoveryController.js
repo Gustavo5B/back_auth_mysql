@@ -5,25 +5,6 @@ import { generateCode, sendRecoveryCode } from "../services/emailService.js";
 
 dotenv.config();
 
-// 🔒 Rate limiting simple en memoria
-const rateLimitStore = new Map();
-const RATE_LIMIT_WINDOW = 15 * 60 * 1000;
-const MAX_ATTEMPTS = 3;
-
-const checkRateLimit = (correo) => {
-  const now = Date.now();
-  const userAttempts = rateLimitStore.get(correo) || [];
-  const recentAttempts = userAttempts.filter(time => now - time < RATE_LIMIT_WINDOW);
-  
-  if (recentAttempts.length >= MAX_ATTEMPTS) {
-    return { allowed: false, remainingTime: RATE_LIMIT_WINDOW - (now - recentAttempts[0]) };
-  }
-  
-  recentAttempts.push(now);
-  rateLimitStore.set(correo, recentAttempts);
-  return { allowed: true };
-};
-
 // ✅ HELPER: Reintentar operaciones con la BD
 const retryOperation = async (operation, retries = 3, delay = 1000) => {
   for (let i = 0; i < retries; i++) {
@@ -40,7 +21,18 @@ const retryOperation = async (operation, retries = 3, delay = 1000) => {
   }
 };
 
-// Solicitar código de recuperación
+// =========================================================
+// 🔒 HELPER: Calcular tiempo de bloqueo progresivo
+// =========================================================
+const calcularTiempoBloqueoRecuperacion = (bloqueosTotales) => {
+  if (bloqueosTotales === 0) return 15;      // 15 minutos (primer bloqueo)
+  if (bloqueosTotales === 1) return 30;      // 30 minutos (segundo bloqueo)
+  return 60;                                  // 60 minutos (tercer bloqueo en adelante)
+};
+
+// =========================================================
+// 📧 SOLICITAR CÓDIGO DE RECUPERACIÓN (CON RATE LIMITING MEJORADO)
+// =========================================================
 export const requestRecoveryCode = async (req, res) => {
   let connection;
   
@@ -51,64 +43,169 @@ export const requestRecoveryCode = async (req, res) => {
       return res.status(400).json({ message: "El correo es obligatorio" });
     }
 
-    // Rate limiting
-    const rateCheck = checkRateLimit(correo);
-    if (!rateCheck.allowed) {
-      const minutes = Math.ceil(rateCheck.remainingTime / 60000);
-      return res.status(429).json({ 
-        message: `Demasiados intentos. Intenta de nuevo en ${minutes} minutos` 
-      });
-    }
+    console.log(`📧 Solicitud de recuperación para: ${correo}`);
 
-    // ✅ OBTENER CONEXIÓN CON REINTENTOS
+    // ✅ OBTENER CONEXIÓN
     connection = await retryOperation(() => pool.getConnection());
 
-    // Verificar usuario con reintentos
+    // ============================================
+    // 1️⃣ BUSCAR USUARIO
+    // ============================================
     const [users] = await retryOperation(() => 
       connection.query('SELECT * FROM Usuarios WHERE correo = ?', [correo])
     );
 
-    if (users.length > 0) {
-      // Invalidar códigos anteriores con reintentos
-      await retryOperation(() => 
-        connection.query(
-          'UPDATE codigosrecuperacion SET usado = TRUE WHERE correo = ? AND usado = FALSE',
-          [correo]
-        )
-      );
+    if (users.length === 0) {
+      console.log(`❌ Correo no encontrado: ${correo}`);
+      // 🔒 SEGURIDAD: No revelar si el correo existe
+      return res.json({ 
+        message: "Si el correo existe, recibirás un código de recuperación",
+        correo: correo
+      });
+    }
 
-      const codigo = generateCode();
-      const fechaExpiracion = new Date();
-      fechaExpiracion.setMinutes(fechaExpiracion.getMinutes() + 15);
+    const user = users[0];
 
-      // Insertar código con reintentos
-     // await retryOperation(() =>
-       // connection.query(
-         // 'INSERT INTO codigosrecuperacion (correo, codigo, fecha_expiracion) VALUES (?, ?, ?)',
-          //[correo, codigo, fechaExpiracion]
-        //)
-      //);
-      await retryOperation(() =>
-  connection.query(
-    `INSERT INTO codigosrecuperacion (correo, codigo, fecha_expiracion)
-     VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 15 MINUTE))`,
-    [correo, codigo]
-  )
-);
+    // ============================================
+    // 2️⃣ VERIFICAR SI ESTÁ BLOQUEADO
+    // ============================================
+    if (user.bloqueado_recuperacion_hasta) {
+      const ahora = new Date();
+      const desbloqueo = new Date(user.bloqueado_recuperacion_hasta);
 
+      if (ahora < desbloqueo) {
+        // 🔒 AÚN ESTÁ BLOQUEADO
+        const minutosRestantes = Math.ceil((desbloqueo - ahora) / 60000);
+        const horaDesbloqueo = desbloqueo.toLocaleTimeString('es-MX', {
+          hour: '2-digit',
+          minute: '2-digit'
+        });
 
-      // Enviar email
-      try {
-        await sendRecoveryCode(correo, codigo);
-        console.log(`✅ Código enviado a ${correo}: ${codigo}`);
-      } catch (emailError) {
-        console.error('❌ Error al enviar email:', emailError);
+        console.log(`🔒 Recuperación bloqueada hasta: ${horaDesbloqueo}`);
+
+        return res.status(429).json({
+          blocked: true,
+          message: `🔒 Demasiados intentos de recuperación. Por favor espera ${minutosRestantes} minuto${minutosRestantes > 1 ? 's' : ''} antes de intentar de nuevo.`,
+          minutesRemaining: minutosRestantes,
+          unlockTime: horaDesbloqueo
+        });
+      } else {
+        // ✅ DESBLOQUEO AUTOMÁTICO
+        console.log('✅ Desbloqueando recuperación automáticamente...');
+        await retryOperation(() =>
+          connection.query(
+            `UPDATE Usuarios 
+             SET bloqueado_recuperacion_hasta = NULL, 
+                 intentos_recuperacion = 0 
+             WHERE id_usuario = ?`,
+            [user.id_usuario]
+          )
+        );
+        user.bloqueado_recuperacion_hasta = null;
+        user.intentos_recuperacion = 0;
       }
     }
 
+    // ============================================
+    // 3️⃣ VERIFICAR VENTANA DE 15 MINUTOS
+    // ============================================
+    const ahora = new Date();
+    const hace15Min = new Date(ahora.getTime() - 15 * 60000);
+    
+    let intentosActuales = user.intentos_recuperacion || 0;
+    const ultimoIntento = user.ultimo_intento_recuperacion ? new Date(user.ultimo_intento_recuperacion) : null;
+
+    // Si el último intento fue hace más de 15 minutos, resetear contador
+    if (!ultimoIntento || ultimoIntento < hace15Min) {
+      console.log('⏰ Ventana de 15 minutos expirada, reseteando contador');
+      intentosActuales = 0;
+    }
+
+    // ============================================
+    // 4️⃣ VERIFICAR LÍMITE DE INTENTOS
+    // ============================================
+    const nuevoIntentos = intentosActuales + 1;
+    console.log(`📊 Intento de recuperación #${nuevoIntentos}/3`);
+
+    if (nuevoIntentos > 3) {
+      // 🔒 BLOQUEAR TEMPORALMENTE
+      const tiempoBloqueo = calcularTiempoBloqueoRecuperacion(user.total_bloqueos_recuperacion || 0);
+
+      await retryOperation(() =>
+        connection.query(
+          `UPDATE Usuarios 
+           SET intentos_recuperacion = ?,
+               bloqueado_recuperacion_hasta = DATE_ADD(NOW(), INTERVAL ? MINUTE),
+               total_bloqueos_recuperacion = total_bloqueos_recuperacion + 1,
+               ultimo_intento_recuperacion = NOW()
+           WHERE id_usuario = ?`,
+          [nuevoIntentos, tiempoBloqueo, user.id_usuario]
+        )
+      );
+
+      console.log(`🔒 Recuperación bloqueada por ${tiempoBloqueo} minutos`);
+
+      return res.status(429).json({
+        blocked: true,
+        message: `🔒 Has excedido el límite de intentos de recuperación. Tu cuenta ha sido bloqueada por ${tiempoBloqueo} minutos por seguridad.`,
+        minutesBlocked: tiempoBloqueo
+      });
+    }
+
+    // ============================================
+    // 5️⃣ INVALIDAR CÓDIGOS ANTERIORES
+    // ============================================
+    await retryOperation(() => 
+      connection.query(
+        'UPDATE codigosrecuperacion SET usado = TRUE WHERE correo = ? AND usado = FALSE',
+        [correo]
+      )
+    );
+
+    // ============================================
+    // 6️⃣ GENERAR Y GUARDAR CÓDIGO
+    // ============================================
+    const codigo = generateCode();
+
+    await retryOperation(() =>
+      connection.query(
+        `INSERT INTO codigosrecuperacion (correo, codigo, fecha_expiracion)
+         VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 15 MINUTE))`,
+        [correo, codigo]
+      )
+    );
+
+    // ============================================
+    // 7️⃣ ACTUALIZAR CONTADOR DE INTENTOS
+    // ============================================
+    await retryOperation(() =>
+      connection.query(
+        `UPDATE Usuarios 
+         SET intentos_recuperacion = ?,
+             ultimo_intento_recuperacion = NOW()
+         WHERE id_usuario = ?`,
+        [nuevoIntentos, user.id_usuario]
+      )
+    );
+
+    // ============================================
+    // 8️⃣ ENVIAR EMAIL
+    // ============================================
+    try {
+      await sendRecoveryCode(correo, codigo);
+      console.log(`✅ Código enviado a ${correo}: ${codigo}`);
+    } catch (emailError) {
+      console.error('❌ Error al enviar email:', emailError);
+    }
+
+    const intentosRestantes = 3 - nuevoIntentos;
+    console.log(`✅ Código enviado. Intentos restantes: ${intentosRestantes}`);
+
     res.json({ 
       message: "Si el correo existe, recibirás un código de recuperación",
-      correo: correo
+      correo: correo,
+      attemptsRemaining: intentosRestantes,
+      warning: intentosRestantes === 1 ? "⚠️ Este es tu último intento antes del bloqueo temporal." : null
     });
 
   } catch (error) {
@@ -126,7 +223,9 @@ export const requestRecoveryCode = async (req, res) => {
   }
 };
 
-// Validar código de recuperación
+// =========================================================
+// ✅ VALIDAR CÓDIGO DE RECUPERACIÓN
+// =========================================================
 export const validateRecoveryCode = async (req, res) => {
   let connection;
   
@@ -165,7 +264,9 @@ export const validateRecoveryCode = async (req, res) => {
   }
 };
 
-// Restablecer contraseña
+// =========================================================
+// 🔑 RESTABLECER CONTRASEÑA
+// =========================================================
 export const resetPassword = async (req, res) => {
   let connection;
   
@@ -191,6 +292,7 @@ export const resetPassword = async (req, res) => {
     connection = await retryOperation(() => pool.getConnection());
     await connection.beginTransaction();
 
+    // Verificar código
     const [codes] = await retryOperation(() =>
       connection.query(
         `SELECT * FROM codigosrecuperacion
@@ -205,6 +307,7 @@ export const resetPassword = async (req, res) => {
       return res.status(401).json({ message: "Código inválido o expirado" });
     }
 
+    // Verificar usuario
     const [users] = await retryOperation(() =>
       connection.query('SELECT id_usuario FROM Usuarios WHERE correo = ?', [correo])
     );
@@ -214,20 +317,33 @@ export const resetPassword = async (req, res) => {
       return res.status(404).json({ message: "Usuario no encontrado" });
     }
 
+    // Actualizar contraseña
     const hashedPassword = await bcrypt.hash(nuevaContrasena, 10);
 
     await retryOperation(() =>
       connection.query('UPDATE Usuarios SET contrasena = ? WHERE correo = ?', [hashedPassword, correo])
     );
 
+    // Marcar código como usado
     await retryOperation(() =>
       connection.query('UPDATE codigosrecuperacion SET usado = TRUE WHERE correo = ?', [correo])
+    );
+
+    // ✅ RESETEAR CONTADORES DE RECUPERACIÓN
+    await retryOperation(() =>
+      connection.query(
+        `UPDATE Usuarios 
+         SET intentos_recuperacion = 0,
+             bloqueado_recuperacion_hasta = NULL,
+             ultimo_intento_recuperacion = NULL
+         WHERE correo = ?`,
+        [correo]
+      )
     );
 
     await connection.commit();
     
     console.log(`✅ Contraseña actualizada para ${correo}`);
-    rateLimitStore.delete(correo);
     
     res.json({ message: "Contraseña actualizada exitosamente" });
 
@@ -240,7 +356,9 @@ export const resetPassword = async (req, res) => {
   }
 };
 
-// Limpieza periódica
+// =========================================================
+// 🧹 LIMPIEZA PERIÓDICA DE CÓDIGOS EXPIRADOS
+// =========================================================
 export const cleanupExpiredCodes = async () => {
   try {
     const [result] = await retryOperation(() =>
@@ -248,6 +366,6 @@ export const cleanupExpiredCodes = async () => {
     );
     console.log(`🧹 Códigos eliminados: ${result.affectedRows}`);
   } catch (error) {
-    console.error('Error al limpiar códigos:', error);
+    console.error('❌ Error al limpiar códigos:', error);
   }
 };
