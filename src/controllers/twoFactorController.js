@@ -1,6 +1,34 @@
 import speakeasy from "speakeasy";
 import QRCode from "qrcode";
-import { poolPromise } from "../config/db.js";
+import { pool } from "../config/db.js";
+
+// =========================================================
+// 🔒 LOGGER SEGURO
+// =========================================================
+const secureLog = {
+  info: (message, metadata = {}) => {
+    const sanitized = { ...metadata };
+    delete sanitized.token;
+    delete sanitized.secret;
+    delete sanitized.codigo;
+    
+    console.log(`ℹ️ ${message}`, Object.keys(sanitized).length > 0 ? sanitized : '');
+  },
+  
+  error: (message, error) => {
+    console.error(`❌ ${message}`, {
+      name: error.name,
+      code: error.code
+    });
+  },
+  
+  security: (action, userId, metadata = {}) => {
+    console.log(`🔐 SECURITY [${action}] User:${userId || 'unknown'}`, {
+      timestamp: new Date().toISOString(),
+      ...metadata
+    });
+  }
+};
 
 // ===============================
 // 🔹 Generar secreto y QR para TOTP
@@ -9,9 +37,15 @@ export const setupTOTP = async (req, res) => {
   try {
     const { correo } = req.body;
 
+    secureLog.info('Configurando TOTP', { correo });
+
+    if (!correo) {
+      return res.status(400).json({ message: "Correo requerido" });
+    }
+
     // Generar secreto TOTP
     const secret = speakeasy.generateSecret({
-      name: `LoginApp (${correo})`,
+      name: `NU-B Studio (${correo})`,
       length: 32,
     });
 
@@ -19,13 +53,15 @@ export const setupTOTP = async (req, res) => {
     const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
 
     // Guardar el secreto temporalmente en BD
-    const pool = await poolPromise;
     await pool.query(
       `UPDATE Usuarios 
        SET secreto_2fa = ?, metodo_2fa = 'TOTP', esta_2fa_habilitado = 0 
-       WHERE correo = ?`,
+       WHERE correo = ? 
+       LIMIT 1`,
       [secret.base32, correo]
     );
+
+    secureLog.security('TOTP_GENERADO', null, { correo });
 
     res.json({
       message: "TOTP generado correctamente ✅",
@@ -33,7 +69,7 @@ export const setupTOTP = async (req, res) => {
       qrCode: qrCodeUrl,
     });
   } catch (error) {
-    console.error("❌ Error en setupTOTP:", error);
+    secureLog.error('Error en setupTOTP', error);
     res.status(500).json({ message: "Error al configurar TOTP" });
   }
 };
@@ -45,39 +81,50 @@ export const verifyTOTP = async (req, res) => {
   try {
     const { correo, token } = req.body;
 
-    const pool = await poolPromise;
+    secureLog.info('Verificando código TOTP', { correo });
+
+    if (!correo || !token) {
+      return res.status(400).json({ message: "Correo y código requeridos" });
+    }
+
     const [rows] = await pool.query(
-      "SELECT secreto_2fa FROM Usuarios WHERE correo = ?",
+      "SELECT id_usuario, secreto_2fa FROM Usuarios WHERE correo = ? LIMIT 1",
       [correo]
     );
 
-    if (rows.length === 0)
+    if (rows.length === 0) {
       return res.status(404).json({ message: "Usuario no encontrado" });
+    }
 
-    const secret = rows[0].secreto_2fa;
+    const user = rows[0];
+    const secret = user.secreto_2fa;
 
     // Verificar el código TOTP
     const verified = speakeasy.totp.verify({
       secret,
       encoding: "base32",
       token,
-      window: 2, // margen de 60s
+      window: 2,
     });
 
     if (verified) {
       await pool.query(
         `UPDATE Usuarios 
          SET esta_2fa_habilitado = 1 
-         WHERE correo = ?`,
+         WHERE correo = ? 
+         LIMIT 1`,
         [correo]
       );
 
+      secureLog.security('TOTP_ACTIVADO', user.id_usuario);
+
       res.json({ message: "TOTP verificado y activado correctamente ✅" });
     } else {
+      secureLog.security('TOTP_CODIGO_INCORRECTO', user.id_usuario);
       res.status(401).json({ message: "Código TOTP incorrecto ❌" });
     }
   } catch (error) {
-    console.error("❌ Error en verifyTOTP:", error);
+    secureLog.error('Error en verifyTOTP', error);
     res.status(500).json({ message: "Error al verificar TOTP" });
   }
 };
@@ -89,16 +136,23 @@ export const validateTOTP = async (req, res) => {
   try {
     const { correo, token } = req.body;
 
-    const pool = await poolPromise;
+    secureLog.info('Validando TOTP durante login', { correo });
+
+    if (!correo || !token) {
+      return res.status(400).json({ message: "Correo y código requeridos" });
+    }
+
     const [rows] = await pool.query(
-      "SELECT secreto_2fa FROM Usuarios WHERE correo = ?",
+      "SELECT id_usuario, secreto_2fa FROM Usuarios WHERE correo = ? LIMIT 1",
       [correo]
     );
 
-    if (rows.length === 0)
+    if (rows.length === 0) {
       return res.status(404).json({ message: "Usuario no encontrado" });
+    }
 
-    const secret = rows[0].secreto_2fa;
+    const user = rows[0];
+    const secret = user.secreto_2fa;
 
     const verified = speakeasy.totp.verify({
       secret,
@@ -108,61 +162,14 @@ export const validateTOTP = async (req, res) => {
     });
 
     if (verified) {
+      secureLog.security('TOTP_VALIDACION_EXITOSA', user.id_usuario);
       res.json({ valid: true, message: "Código válido ✅" });
     } else {
+      secureLog.security('TOTP_VALIDACION_FALLIDA', user.id_usuario);
       res.status(401).json({ valid: false, message: "Código incorrecto ❌" });
     }
   } catch (error) {
-    console.error("❌ Error en validateTOTP:", error);
+    secureLog.error('Error en validateTOTP', error);
     res.status(500).json({ message: "Error al validar TOTP" });
   }
-  // Enviar código de 2FA por email durante el login
-router.post('/send-login-code', async (req, res) => {
-  try {
-    const { correo } = req.body;
-
-    if (!correo) {
-      return res.status(400).json({ message: 'El correo es obligatorio' });
-    }
-
-    // Verificar que el usuario existe
-    const [users] = await pool.query(
-      'SELECT * FROM Usuarios WHERE correo = ?',
-      [correo]
-    );
-
-    if (users.length === 0) {
-      return res.status(404).json({ message: 'Usuario no encontrado' });
-    }
-
-    // Generar código de 6 dígitos
-    const codigo = Math.floor(100000 + Math.random() * 900000).toString();
-    const fechaExpiracion = new Date();
-    fechaExpiracion.setMinutes(fechaExpiracion.getMinutes() + 5);
-
-    // Invalidar códigos anteriores
-    await pool.query(
-      'UPDATE Codigos2FA SET usado = TRUE WHERE correo = ? AND usado = FALSE',
-      [correo]
-    );
-
-    // Guardar nuevo código
-    await pool.query(
-      'INSERT INTO Codigos2FA (correo, codigo, fecha_expiracion) VALUES (?, ?, ?)',
-      [correo, codigo, fechaExpiracion]
-    );
-
-    // Enviar email
-    await sendEmail2FA(correo, codigo);
-
-    res.json({ 
-      message: 'Código enviado correctamente',
-      expiresIn: '5 minutos'
-    });
-
-  } catch (error) {
-    console.error('❌ Error al enviar código:', error);
-    res.status(500).json({ message: 'Error al enviar el código' });
-  }
-});
 };

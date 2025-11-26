@@ -12,6 +12,14 @@ apiKey.apiKey = process.env.BREVO_API_KEY;
 
 const apiInstance = new brevo.TransactionalEmailsApi();
 
+// ✅ VERIFICAR QUE LA API KEY ESTÉ CONFIGURADA
+if (!process.env.BREVO_API_KEY) {
+  console.error('❌ ERROR CRÍTICO: BREVO_API_KEY no está configurada en .env');
+  throw new Error('BREVO_API_KEY no configurada');
+}
+
+console.log('✅ Brevo API configurada correctamente');
+
 // =========================================================
 // 📧 ENVIAR EMAIL DE VERIFICACIÓN DE CUENTA
 // =========================================================
@@ -107,12 +115,13 @@ export const sendVerificationEmail = async (email, nombre, codigo) => {
     };
 
     const result = await apiInstance.sendTransacEmail(sendSmtpEmail);
-    console.log(`✅ Email de verificación enviado a: ${email} (ID: ${result.messageId})`);
+    console.log(`✅ Email de verificación enviado (Message ID: ${result.messageId})`);
+    
     return { success: true, messageId: result.messageId };
 
   } catch (error) {
-    console.error('❌ Error al enviar email de verificación:', error);
-    console.error('Detalles:', error.response?.body || error.message);
+    console.error('❌ Error al enviar email de verificación');
+    console.error('Error code:', error.code || 'UNKNOWN');
     throw new Error('Error al enviar el correo de verificación');
   }
 };
@@ -136,7 +145,7 @@ export const sendWelcomeEmail = async (email, nombre) => {
     const sendSmtpEmail = {
       sender: {
         name: 'NU-B Studio',
-        email: 'gustavotubazo@gmail.com', // Remitente verificado en Brevo ✅
+        email: 'gustavotubazo@gmail.com',
       },
       to: [{ email, name: nombre }],
       subject: '🎉 ¡Bienvenido a NU-B Studio!',
@@ -303,12 +312,13 @@ export const sendWelcomeEmail = async (email, nombre) => {
     };
 
     const result = await apiInstance.sendTransacEmail(sendSmtpEmail);
-    console.log(`✅ Email de bienvenida enviado a: ${email} (ID: ${result.messageId})`);
+    console.log(`✅ Email de bienvenida enviado (Message ID: ${result.messageId})`);
+    
     return { success: true, messageId: result.messageId };
 
   } catch (error) {
-    console.error('❌ Error al enviar email de bienvenida:', error);
-    console.error('Detalles:', error.response?.body || error.message);
+    console.error('❌ Error al enviar email de bienvenida');
+    console.error('Error code:', error.code || 'UNKNOWN');
     throw new Error('Error al enviar el correo de bienvenida');
   }
 };
@@ -321,7 +331,7 @@ export const sendRecoveryCode = async (email, code) => {
     const sendSmtpEmail = {
       sender: {
         name: 'NubStudio',
-        email: 'gustavotubazo@gmail.com', // Remitente verificado en Brevo ✅
+        email: 'gustavotubazo@gmail.com',
       },
       to: [{ email }],
       subject: '🔑 Recuperación de contraseña - NU-B Studio',
@@ -404,12 +414,13 @@ export const sendRecoveryCode = async (email, code) => {
     };
 
     const result = await apiInstance.sendTransacEmail(sendSmtpEmail);
-    console.log('✅ Email enviado correctamente. ID:', result.messageId);
+    console.log('✅ Email de recuperación enviado (Message ID:', result.messageId, ')');
+    
     return { success: true, messageId: result.messageId };
 
   } catch (error) {
-    console.error('❌ Error al enviar email con Brevo:', error);
-    console.error('Detalles completos:', error.response?.body || error.message);
+    console.error('❌ Error al enviar email de recuperación');
+    console.error('Error code:', error.code || 'UNKNOWN');
     throw new Error('Error al enviar el código por correo');
   }
 };
@@ -419,10 +430,12 @@ export const sendRecoveryCode = async (email, code) => {
 // =========================================================
 export const sendGmail2FACode = async (email, code) => {
   try {
+    console.log('📧 Intentando enviar email 2FA a:', email.substring(0, 3) + '***');
+    
     const sendSmtpEmail = {
       sender: {
         name: 'NU-B Studio Seguridad',
-        email: 'gustavotubazo@gmail.com', // Remitente verificado en Brevo ✅
+        email: 'gustavotubazo@gmail.com',
       },
       to: [{ email }],
       subject: '🔐 Código de verificación (2FA) - NU-B Studio',
@@ -503,19 +516,39 @@ export const sendGmail2FACode = async (email, code) => {
       `,
     };
 
+    console.log('📤 Enviando email a través de Brevo API...');
     const result = await apiInstance.sendTransacEmail(sendSmtpEmail);
-    console.log('✅ Email 2FA enviado correctamente. ID:', result.messageId);
+    
+    console.log('✅ Email 2FA enviado (Message ID:', result.messageId, ')');
+    
     return { success: true, messageId: result.messageId };
   } catch (error) {
-    console.error('❌ Error al enviar correo 2FA con Brevo:', error);
-    console.error('Detalles:', error.response?.body || error.message);
-    throw new Error('Error al enviar el correo 2FA');
+    console.error('❌ Error detallado al enviar email 2FA:');
+    console.error('Error name:', error.name);
+    console.error('Error code:', error.code);
+    console.error('Error message:', error.message);
+    
+    if (error.response) {
+      console.error('Response status:', error.response.status);
+      console.error('Response body:', JSON.stringify(error.response.body, null, 2));
+    }
+    
+    throw new Error(`Email service error: ${error.message || error.code || 'UNKNOWN'}`);
   }
 };
 
 // =========================================================
 // 🧹 LIMPIEZA AUTOMÁTICA DE CÓDIGOS EXPIRADOS
 // =========================================================
-export const cleanupExpiredCodes = () => {
-  console.log('🧹 Limpieza de códigos expirados ejecutada');
+export const cleanupExpiredCodes = async () => {
+  try {
+    console.log('🧹 Ejecutando limpieza de códigos expirados...');
+    // Si tienes una tabla de códigos, agregar lógica aquí
+    // Por ahora, solo un placeholder
+    console.log('✅ Limpieza completada');
+    return true;
+  } catch (error) {
+    console.error('❌ Error en limpieza de códigos:', error);
+    return false;
+  }
 };

@@ -7,7 +7,37 @@ import { sendVerificationEmail } from "../services/emailService.js";
 dotenv.config();
 
 // =========================================================
-// 📍 OBTENER IP REAL DEL USUARIO (RENDER + VERCEL)
+// 🔒 LOGGER SEGURO
+// =========================================================
+const secureLog = {
+  info: (message, metadata = {}) => {
+    const sanitized = { ...metadata };
+    delete sanitized.contrasena;
+    delete sanitized.password;
+    delete sanitized.codigo;
+    delete sanitized.codigoVerificacion;
+    delete sanitized.ip; // ✅ NO loggear IPs completas
+    
+    console.log(`ℹ️ ${message}`, Object.keys(sanitized).length > 0 ? sanitized : '');
+  },
+  
+  error: (message, error) => {
+    console.error(`❌ ${message}`, {
+      name: error.name,
+      code: error.code
+    });
+  },
+  
+  security: (action, userId, metadata = {}) => {
+    console.log(`🔐 SECURITY [${action}] User:${userId || 'unknown'}`, {
+      timestamp: new Date().toISOString(),
+      ...metadata
+    });
+  }
+};
+
+// =========================================================
+// 📍 OBTENER IP REAL DEL USUARIO
 // =========================================================
 const getClientIP = (req) => {
   const forwarded = req.headers['x-forwarded-for'];
@@ -50,7 +80,6 @@ const getMexicoDateTime = () => {
   return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 };
 
-
 // =========================================================
 // 🔢 GENERAR CÓDIGO DE VERIFICACIÓN DE 6 DÍGITOS
 // =========================================================
@@ -59,13 +88,51 @@ const generateVerificationCode = () => {
 };
 
 // =========================================================
-// 🛡️ SANITIZAR NOMBRE (Protección contra XSS)
+// 🛡️ SANITIZAR NOMBRE
 // =========================================================
 const sanitizeName = (nombre) => {
   return nombre
     .trim()
     .replace(/[<>\"'`]/g, '')
     .substring(0, 100);
+};
+
+// =========================================================
+// 🛡️ SANITIZAR EMAIL
+// =========================================================
+const sanitizeEmail = (email) => {
+  return email
+    .trim()
+    .toLowerCase()
+    .replace(/[<>\"'`]/g, '')
+    .substring(0, 255);
+};
+
+// =========================================================
+// 🛡️ SANITIZAR CONTRASEÑA
+// =========================================================
+const sanitizePassword = (password) => {
+  const maliciousPatterns = [
+    /<script/i,
+    /<\/script/i,
+    /javascript:/i,
+    /onerror=/i,
+    /onclick=/i,
+    /<iframe/i,
+    /eval\(/i,
+    /alert\(/i,
+    /onload=/i,
+    /<img/i,
+    /src=/i
+  ];
+
+  for (const pattern of maliciousPatterns) {
+    if (pattern.test(password)) {
+      throw new Error('Contraseña contiene caracteres no permitidos');
+    }
+  }
+
+  return password.trim();
 };
 
 // =========================================================
@@ -125,35 +192,29 @@ const isValidEmail = (email) => {
 };
 
 // =========================================================
-// 📝 REGISTRO DE USUARIO CON VERIFICACIÓN DE EMAIL Y TÉRMINOS
+// 📝 REGISTRO DE USUARIO CON VERIFICACIÓN
 // =========================================================
 export const register = async (req, res) => {
   let { nombre, correo, contrasena, aceptoTerminos } = req.body;
 
   try {
-    console.log('📝 Iniciando registro para:', correo);
+    secureLog.info('Iniciando proceso de registro', { correo });
 
-    // ============================================
     // 1️⃣ VALIDACIONES BÁSICAS
-    // ============================================
     if (!nombre || !correo || !contrasena) {
       return res.status(400).json({ 
         message: "Todos los campos son obligatorios" 
       });
     }
 
-    // ============================================
     // ✅ VALIDAR ACEPTACIÓN DE TÉRMINOS
-    // ============================================
     if (!aceptoTerminos || aceptoTerminos !== true) {
       return res.status(400).json({ 
         message: "Debes aceptar los Términos y Condiciones para continuar" 
       });
     }
 
-    // ============================================
     // 2️⃣ SANITIZAR Y VALIDAR NOMBRE
-    // ============================================
     nombre = sanitizeName(nombre);
     
     if (!isValidName(nombre)) {
@@ -162,10 +223,8 @@ export const register = async (req, res) => {
       });
     }
 
-    // ============================================
-    // 3️⃣ VALIDAR FORMATO DE EMAIL
-    // ============================================
-    correo = correo.trim().toLowerCase();
+    // 3️⃣ SANITIZAR Y VALIDAR EMAIL
+    correo = sanitizeEmail(correo);
     
     if (!isValidEmail(correo)) {
       return res.status(400).json({ 
@@ -173,9 +232,15 @@ export const register = async (req, res) => {
       });
     }
 
-    // ============================================
-    // 4️⃣ VALIDAR COMPLEJIDAD DE CONTRASEÑA
-    // ============================================
+    // 4️⃣ SANITIZAR Y VALIDAR CONTRASEÑA
+    try {
+      contrasena = sanitizePassword(contrasena);
+    } catch (error) {
+      return res.status(400).json({ 
+        message: error.message 
+      });
+    }
+
     const passwordErrors = validatePasswordStrength(contrasena);
     
     if (passwordErrors.length > 0) {
@@ -185,50 +250,32 @@ export const register = async (req, res) => {
       });
     }
 
-    // ============================================
     // 5️⃣ VERIFICAR SI EL CORREO YA EXISTE
-    // ============================================
-    console.log('🔍 Verificando si el correo ya existe...');
     const [existingUser] = await pool.query(
       "SELECT id_usuario FROM Usuarios WHERE correo = ? LIMIT 1",
       [correo]
     );
 
     if (existingUser.length > 0) {
+      secureLog.security('REGISTRO_DUPLICADO', null, { correo });
       return res.status(400).json({ 
         message: "El correo ya está registrado." 
       });
     }
 
-    // ============================================
     // 6️⃣ ENCRIPTAR CONTRASEÑA
-    // ============================================
-    console.log('🔐 Encriptando contraseña...');
     const saltRounds = 12;
     const hash = await bcrypt.hash(contrasena, saltRounds);
 
-    // ============================================
     // 7️⃣ GENERAR CÓDIGO DE VERIFICACIÓN
-    // ============================================
     const codigoVerificacion = generateVerificationCode();
-    const expiracion = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 horas
+    const expiracion = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-    console.log('🔢 Código generado:', codigoVerificacion);
-
-    // ============================================
-    // 📍 OBTENER IP Y FECHA/HORA DE MÉXICO
-    // ============================================
+    // 📍 OBTENER IP Y FECHA/HORA
     const ipUsuario = getClientIP(req);
     const fechaAceptacion = getMexicoDateTime();
 
-    console.log('📍 IP del usuario:', ipUsuario);
-    console.log('🕐 Fecha/hora de aceptación:', fechaAceptacion);
-
-    // ============================================
-    // 8️⃣ INSERTAR USUARIO CON TÉRMINOS ACEPTADOS
-    // ============================================
-    console.log('💾 Guardando usuario en BD con estado Pendiente...');
-    
+    // 8️⃣ INSERTAR USUARIO
     const insertQuery = `
       INSERT INTO Usuarios 
       (nombre, correo, contrasena, estado, codigo_verificacion, expiracion_codigo_verificacion,
@@ -243,24 +290,25 @@ export const register = async (req, res) => {
       "Pendiente",
       codigoVerificacion,
       expiracion,
-      true,                    // acepto_terminos
-      fechaAceptacion,         // ✅ Fecha/hora de México
-      '1.0',                   // version_terminos_aceptada
-      ipUsuario                // ✅ IP real del cliente
+      true,
+      fechaAceptacion,
+      '1.0',
+      ipUsuario
     ]);
 
-    console.log(`✅ Usuario registrado (Pendiente): ${correo} (ID: ${result.insertId})`);
-    console.log(`📋 Términos aceptados: v1.0 desde IP: ${ipUsuario} a las ${fechaAceptacion}`);
+    secureLog.security('REGISTRO_EXITOSO', result.insertId, { 
+      correo,
+      terminosAceptados: true 
+    });
 
-    // ============================================
     // 9️⃣ ENVIAR EMAIL DE VERIFICACIÓN
-    // ============================================
     try {
-      console.log('📧 Enviando código de verificación por email...');
       await sendVerificationEmail(correo, nombre, codigoVerificacion);
-      console.log(`✅ Código de verificación enviado a: ${correo}`);
+      secureLog.info('Código de verificación enviado', { 
+        userId: result.insertId 
+      });
     } catch (emailError) {
-      console.error(`⚠️ Error al enviar email a ${correo}:`, emailError.message);
+      secureLog.error('Error al enviar email de verificación', emailError);
       
       // Si falla el email, eliminar el usuario creado
       await pool.query(
@@ -273,9 +321,7 @@ export const register = async (req, res) => {
       });
     }
 
-    // ============================================
     // 🎉 RESPONDER AL CLIENTE
-    // ============================================
     res.status(201).json({ 
       message: "Registro exitoso. Revisa tu correo para verificar tu cuenta 📧",
       requiresVerification: true,
@@ -284,14 +330,13 @@ export const register = async (req, res) => {
         nombre,
         correo,
         terminos_aceptados: true,
-        version_terminos: '1.0',
-        fecha_aceptacion: fechaAceptacion,
-        ip_registro: ipUsuario
+        version_terminos: '1.0'
+        // ❌ NO enviar IP ni fecha al cliente
       }
     });
 
   } catch (error) {
-    console.error("❌ Error en registro:", error);
+    secureLog.error('Error en registro', error);
     
     if (error.code === 'ER_DUP_ENTRY') {
       return res.status(400).json({ 
@@ -312,7 +357,7 @@ export const verifyEmail = async (req, res) => {
   try {
     let { correo, codigo } = req.body;
 
-    console.log('🔍 Verificando código para:', correo);
+    secureLog.info('Verificando código', { correo });
 
     if (!correo || !codigo) {
       return res.status(400).json({ 
@@ -320,7 +365,8 @@ export const verifyEmail = async (req, res) => {
       });
     }
 
-    correo = correo.trim().toLowerCase();
+    // ✅ SANITIZAR ENTRADAS
+    correo = sanitizeEmail(correo);
     codigo = codigo.trim();
 
     if (!/^\d{6}$/.test(codigo)) {
@@ -347,7 +393,7 @@ export const verifyEmail = async (req, res) => {
     const user = rows[0];
 
     if (user.codigo_verificacion !== codigo) {
-      console.log('❌ Código incorrecto');
+      secureLog.security('CODIGO_VERIFICACION_INCORRECTO', user.id_usuario);
       return res.status(401).json({ 
         message: "Código de verificación incorrecto" 
       });
@@ -357,7 +403,7 @@ export const verifyEmail = async (req, res) => {
     const expiracion = new Date(user.expiracion_codigo_verificacion);
     
     if (now > expiracion) {
-      console.log('❌ Código expirado');
+      secureLog.security('CODIGO_VERIFICACION_EXPIRADO', user.id_usuario);
       return res.status(401).json({ 
         message: "El código ha expirado. Solicita uno nuevo." 
       });
@@ -373,12 +419,12 @@ export const verifyEmail = async (req, res) => {
     
     await pool.query(updateQuery, ['Activo', user.id_usuario]);
 
-    console.log(`✅ Cuenta verificada exitosamente: ${correo}`);
+    secureLog.security('CUENTA_VERIFICADA', user.id_usuario);
 
     const { sendWelcomeEmail } = await import('../services/emailService.js');
     sendWelcomeEmail(correo, user.nombre)
-      .then(() => console.log('📧 Email de bienvenida enviado'))
-      .catch((err) => console.error('⚠️ Error enviando email de bienvenida:', err.message));
+      .then(() => secureLog.info('Email de bienvenida enviado', { userId: user.id_usuario }))
+      .catch((err) => secureLog.error('Error enviando email de bienvenida', err));
 
     res.json({ 
       message: "✅ Cuenta verificada exitosamente. Ya puedes iniciar sesión.",
@@ -386,7 +432,7 @@ export const verifyEmail = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("❌ Error en verificación:", error);
+    secureLog.error('Error en verificación', error);
     res.status(500).json({ 
       message: "Error al verificar cuenta" 
     });
@@ -400,7 +446,7 @@ export const resendVerificationCode = async (req, res) => {
   try {
     let { correo } = req.body;
 
-    console.log('🔄 Reenviando código a:', correo);
+    secureLog.info('Reenviando código', { correo });
 
     if (!correo) {
       return res.status(400).json({ 
@@ -408,7 +454,7 @@ export const resendVerificationCode = async (req, res) => {
       });
     }
 
-    correo = correo.trim().toLowerCase();
+    correo = sanitizeEmail(correo);
 
     const selectQuery = `
       SELECT id_usuario, nombre 
@@ -446,14 +492,14 @@ export const resendVerificationCode = async (req, res) => {
     const { sendVerificationEmail } = await import('../services/emailService.js');
     await sendVerificationEmail(correo, user.nombre, nuevoCodigoVerificacion);
 
-    console.log(`✅ Código reenviado a: ${correo}`);
+    secureLog.security('CODIGO_REENVIADO', user.id_usuario);
 
     res.json({ 
       message: "Código reenviado exitosamente 📧" 
     });
 
   } catch (error) {
-    console.error("❌ Error reenviando código:", error);
+    secureLog.error('Error reenviando código', error);
     res.status(500).json({ 
       message: "Error al reenviar código" 
     });

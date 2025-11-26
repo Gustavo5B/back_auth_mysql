@@ -4,24 +4,79 @@ import dotenv from "dotenv";
 import { pool } from "../config/db.js";
 import { generateCode, sendRecoveryCode, sendWelcomeEmail } from "../services/emailService.js";
 import { saveActiveSession, revokeOtherSessions } from '../services/sessionService.js';
-import crypto from 'crypto'; // ← Agregar este import al inicio
+import crypto from 'crypto';
+
 dotenv.config();
+// =========================================================
+// 🔒 ENMASCARAR EMAIL (para logs y mensajes al usuario)
+// =========================================================
+const maskEmail = (email) => {
+  if (!email) return 'correo oculto';
+  
+  const [localPart, domain] = email.split('@');
+  
+  if (!domain) return '***@***';
+  
+  // Enmascarar parte local (antes del @)
+  const maskedLocal = localPart.length > 4
+    ? localPart.substring(0, 2) + '***' + localPart.substring(localPart.length - 3)
+    : '***';
+  
+  // Enmascarar dominio
+  const domainParts = domain.split('.');
+  const maskedDomain = domainParts.length > 1
+    ? domainParts[0].substring(0, 1) + '***.' + domainParts.slice(1).join('.')
+    : '***';
+  
+  return `${maskedLocal}@${maskedDomain}`;
+};
 
 // =========================================================
-// 🔑 FUNCIÓN PARA GENERAR TOKEN (Centralizada)
+// 🔒 LOGGER SEGURO - NO REGISTRA DATOS SENSIBLES
+// =========================================================
+const secureLog = {
+  info: (message, metadata = {}) => {
+    const sanitized = { ...metadata };
+    delete sanitized.contrasena;
+    delete sanitized.password;
+    delete sanitized.codigo;
+    delete sanitized.token;
+    delete sanitized.secret;
+    
+    console.log(`ℹ️ ${message}`, Object.keys(sanitized).length > 0 ? sanitized : '');
+  },
+  
+  error: (message, error) => {
+    console.error(`❌ ${message}`, {
+      name: error.name,
+      code: error.code
+    });
+  },
+  
+  security: (action, userId, metadata = {}) => {
+    console.log(`🔐 SECURITY [${action}] User:${userId || 'unknown'}`, {
+      timestamp: new Date().toISOString(),
+      ...metadata
+    });
+  }
+};
+
+// =========================================================
+// 🔑 FUNCIÓN PARA GENERAR TOKEN - MINIMIZADA Y SEGURA
 // =========================================================
 const generateToken = (user) => {
   return jwt.sign(
     {
-      sub: user.correo,
-      correo: user.correo,
-      email: user.correo,
-      id_usuario: user.id_usuario,
-      metodo_gmail_2fa: user.metodo_gmail_2fa || false,
-      jti: crypto.randomUUID() // ← AGREGAR ESTO (JWT ID único)
+      sub: user.id_usuario.toString(),
+      jti: crypto.randomUUID()
     },
     process.env.JWT_SECRET,
-    { expiresIn: "24h" }
+    { 
+      algorithm: 'HS256',
+      expiresIn: "24h",
+      issuer: 'nub-studio',
+      audience: 'nub-users'
+    }
   );
 };
 
@@ -29,13 +84,13 @@ const generateToken = (user) => {
 // 🔒 HELPER: Calcular tiempo de bloqueo progresivo
 // =========================================================
 const calcularTiempoBloqueo = (bloqueosTotales) => {
-  if (bloqueosTotales === 0) return 15;      // 15 minutos (primer bloqueo)
-  if (bloqueosTotales === 1) return 30;      // 30 minutos (segundo bloqueo)
-  return 60;                                  // 60 minutos (tercer bloqueo en adelante)
+  if (bloqueosTotales === 0) return 15;
+  if (bloqueosTotales === 1) return 30;
+  return 60;
 };
 
 // =========================================================
-// 📊 HELPER: Registrar en historial (OPCIONAL)
+// 📊 HELPER: Registrar en historial (SIN DATOS SENSIBLES)
 // =========================================================
 const registrarHistorialLogin = async (usuario, tipo, razon = null) => {
   try {
@@ -45,7 +100,7 @@ const registrarHistorialLogin = async (usuario, tipo, razon = null) => {
       [usuario?.id_usuario || null, usuario?.correo || 'desconocido', tipo, razon]
     );
   } catch (error) {
-    console.error('⚠️ Error al registrar historial:', error.message);
+    secureLog.error('Error al registrar historial', error);
   }
 };
 
@@ -56,6 +111,8 @@ export const register = async (req, res) => {
   const { nombre, correo, contrasena } = req.body;
 
   try {
+    secureLog.info('Intento de registro', { email: maskEmail(correo) });
+
     // Validaciones básicas
     if (!nombre || !correo || !contrasena) {
       return res.status(400).json({ 
@@ -79,18 +136,20 @@ export const register = async (req, res) => {
 
     // Verificar si el correo ya existe
     const [existingUser] = await pool.query(
-      "SELECT * FROM Usuarios WHERE correo = ?",
+      "SELECT id_usuario FROM Usuarios WHERE correo = ? LIMIT 1",
       [correo]
     );
 
     if (existingUser.length > 0) {
+      secureLog.security('REGISTRO_DUPLICADO', null, { email: maskEmail(correo) });
       return res.status(400).json({ 
         message: "El correo ya está registrado." 
       });
     }
 
-    // Encriptar contraseña
-    const hash = await bcrypt.hash(contrasena, 10);
+    // Encriptar contraseña con salt automático
+    const saltRounds = 12;
+    const hash = await bcrypt.hash(contrasena, saltRounds);
 
     // Insertar nuevo usuario
     const [result] = await pool.query(
@@ -98,18 +157,17 @@ export const register = async (req, res) => {
       [nombre, correo, hash, "Activo"]
     );
 
-    console.log(`✅ Usuario registrado: ${correo} (ID: ${result.insertId})`);
+    secureLog.security('REGISTRO_EXITOSO', result.insertId, { correo });
 
     // ENVIAR EMAIL DE BIENVENIDA DE FORMA ASÍNCRONA
     sendWelcomeEmail(correo, nombre)
       .then(() => {
-        console.log(`📧 Email de bienvenida enviado a: ${correo}`);
+        secureLog.info('Email de bienvenida enviado', { userId: result.insertId });
       })
       .catch((emailError) => {
-        console.error(`⚠️ No se pudo enviar email a ${correo}:`, emailError.message);
+        secureLog.error('Error enviando email de bienvenida', emailError);
       });
 
-    // Responder inmediatamente al cliente
     res.status(201).json({ 
       message: "Usuario registrado exitosamente ✅",
       user: {
@@ -120,7 +178,7 @@ export const register = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("❌ Error en registro:", error);
+    secureLog.error('Error en registro', error);
     
     if (error.code === 'ER_DUP_ENTRY') {
       return res.status(400).json({ 
@@ -129,62 +187,52 @@ export const register = async (req, res) => {
     }
 
     res.status(500).json({ 
-      message: "Error al registrar usuario.",
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      message: "Error al registrar usuario."
     });
   }
 };
 
 // =========================================================
-// 🔐 LOGIN CON BLOQUEO POR INTENTOS FALLIDOS
+// 🔐 LOGIN CON BLOQUEO Y LOGGING SEGURO
 // =========================================================
 export const login = async (req, res) => {
   try {
     const { correo, contrasena } = req.body;
 
-    console.log('📥 Login attempt:', { correo, hasPassword: !!contrasena });
+    secureLog.info('Intento de login', { email: maskEmail(correo) });
 
-    // ============================================
     // 1️⃣ VALIDACIONES BÁSICAS
-    // ============================================
     if (!correo || !contrasena) {
       return res.status(400).json({ message: "Correo y contraseña son obligatorios." });
     }
 
-    // ============================================
     // 2️⃣ BUSCAR USUARIO
-    // ============================================
-    console.log('🔍 Buscando usuario en BD...');
     const [rows] = await pool.query(
-      "SELECT * FROM Usuarios WHERE correo = ?",
+      "SELECT * FROM Usuarios WHERE correo = ? LIMIT 1",
       [correo]
     );
 
     if (rows.length === 0) {
-      console.log('❌ Usuario no encontrado:', correo);
+      secureLog.security('LOGIN_USUARIO_NO_ENCONTRADO', null, { email: maskEmail(correo) });
       return res.status(404).json({ message: "Usuario no encontrado." });
     }
 
     const user = rows[0];
-    console.log('👤 Usuario encontrado:', user.correo);
+    secureLog.info('Usuario encontrado', { userId: user.id_usuario });
 
-    // ============================================
     // 3️⃣ VERIFICAR SI ESTÁ BLOQUEADO
-    // ============================================
     if (user.bloqueado_hasta) {
       const ahora = new Date();
       const desbloqueo = new Date(user.bloqueado_hasta);
 
       if (ahora < desbloqueo) {
-        // 🔒 AÚN ESTÁ BLOQUEADO
         const minutosRestantes = Math.ceil((desbloqueo - ahora) / 60000);
         const horaDesbloqueo = desbloqueo.toLocaleTimeString('es-MX', {
           hour: '2-digit',
           minute: '2-digit'
         });
 
-        console.log(`🔒 Cuenta bloqueada hasta: ${horaDesbloqueo}`);
-
+        secureLog.security('LOGIN_BLOQUEADO', user.id_usuario);
         await registrarHistorialLogin(user, 'bloqueado', 'Intento durante bloqueo');
 
         return res.status(403).json({
@@ -194,8 +242,7 @@ export const login = async (req, res) => {
           unlockTime: horaDesbloqueo
         });
       } else {
-        // ✅ DESBLOQUEO AUTOMÁTICO
-        console.log('✅ Desbloqueando cuenta automáticamente...');
+        secureLog.security('DESBLOQUEO_AUTOMATICO', user.id_usuario);
         await pool.query(
           `UPDATE Usuarios 
            SET bloqueado_hasta = NULL, 
@@ -208,21 +255,17 @@ export const login = async (req, res) => {
       }
     }
 
-    // ============================================
     // 4️⃣ VALIDAR CONTRASEÑA
-    // ============================================
-    console.log('🔐 Verificando contraseña...');
     const match = await bcrypt.compare(contrasena, user.contrasena);
 
     if (!match) {
-      // ❌ CONTRASEÑA INCORRECTA
-      console.log('❌ Contraseña incorrecta');
-
       const nuevoIntentos = user.intentos_login_fallidos + 1;
-      console.log(`⚠️ Intento fallido #${nuevoIntentos}`);
+      
+      secureLog.security('LOGIN_CONTRASEÑA_INCORRECTA', user.id_usuario, {
+        intento: nuevoIntentos
+      });
 
       if (nuevoIntentos >= 3) {
-        // 🔒 BLOQUEAR CUENTA
         const tiempoBloqueo = calcularTiempoBloqueo(user.bloqueos_totales);
 
         await pool.query(
@@ -237,7 +280,10 @@ export const login = async (req, res) => {
 
         await registrarHistorialLogin(user, 'bloqueado', `Bloqueado por ${tiempoBloqueo} minutos`);
 
-        console.log(`🔒 Cuenta bloqueada por ${tiempoBloqueo} minutos`);
+        secureLog.security('CUENTA_BLOQUEADA', user.id_usuario, {
+          tiempoBloqueo,
+          bloqueosTotales: user.bloqueos_totales + 1
+        });
 
         return res.status(403).json({
           blocked: true,
@@ -246,7 +292,6 @@ export const login = async (req, res) => {
           attempts: nuevoIntentos
         });
       } else {
-        // ⚠️ SOLO INCREMENTAR CONTADOR
         await pool.query(
           `UPDATE Usuarios 
            SET intentos_login_fallidos = ?,
@@ -267,22 +312,16 @@ export const login = async (req, res) => {
       }
     }
 
-    // ============================================
     // 5️⃣ CONTRASEÑA CORRECTA - RESETEAR INTENTOS
-    // ============================================
-    console.log('✅ Contraseña correcta');
-
     if (user.intentos_login_fallidos > 0) {
       await pool.query(
         'UPDATE Usuarios SET intentos_login_fallidos = 0 WHERE id_usuario = ?',
         [user.id_usuario]
       );
-      console.log('✅ Contador de intentos reseteado');
+      secureLog.info('Contador de intentos reseteado', { userId: user.id_usuario });
     }
 
-    // ============================================
     // 6️⃣ VALIDAR ESTADO DE LA CUENTA
-    // ============================================
     if (user.estado !== "Activo") {
       if (user.estado === "Pendiente") {
         return res.status(403).json({
@@ -294,18 +333,16 @@ export const login = async (req, res) => {
       return res.status(403).json({ message: "Cuenta inactiva o suspendida." });
     }
 
-    // ============================================
     // 7️⃣ VERIFICAR 2FA (GMAIL)
-    // ============================================
     if (user.metodo_gmail_2fa) {
-      console.log('✅ Requiere Gmail-2FA');
       const code = generateCode();
       await pool.query(
         'UPDATE Usuarios SET ultimo_codigo_gmail=?, expiracion_codigo_gmail=DATE_ADD(NOW(), INTERVAL 10 MINUTE) WHERE id_usuario=?',
         [code, user.id_usuario]
       );
+      
+      secureLog.security('2FA_GMAIL_ENVIADO', user.id_usuario);
       await sendRecoveryCode(user.correo, code);
-
       await registrarHistorialLogin(user, 'exitoso', '2FA Gmail enviado');
 
       return res.json({
@@ -316,12 +353,9 @@ export const login = async (req, res) => {
       });
     }
 
-    // ============================================
     // 8️⃣ VERIFICAR 2FA (TOTP)
-    // ============================================
     if (user.esta_2fa_habilitado) {
-      console.log('✅ Requiere 2FA TOTP');
-
+      secureLog.security('2FA_TOTP_REQUERIDO', user.id_usuario);
       await registrarHistorialLogin(user, 'exitoso', '2FA TOTP requerido');
 
       return res.json({
@@ -332,18 +366,13 @@ export const login = async (req, res) => {
       });
     }
 
-    // ============================================
     // 9️⃣ LOGIN EXITOSO SIN 2FA
-    // ============================================
-    console.log('✅ Generando token JWT...');
     const token = generateToken(user);
 
-    // 💾 GUARDAR SESIÓN ACTIVA
     await saveActiveSession(user.id_usuario, token, req);
-
     await registrarHistorialLogin(user, 'exitoso', 'Login directo');
 
-    console.log('✅ Login exitoso para:', user.correo);
+    secureLog.security('LOGIN_EXITOSO', user.id_usuario);
 
     res.json({
       message: "Inicio de sesión exitoso ✅",
@@ -358,8 +387,7 @@ export const login = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("❌ Error en login:", error.message);
-    console.error("❌ Stack:", error.stack);
+    secureLog.error('Error crítico en login', error);
     res.status(500).json({ message: "Error interno del servidor." });
   }
 };
@@ -371,17 +399,20 @@ export const loginWith2FA = async (req, res) => {
   try {
     const { correo, codigo2fa } = req.body;
 
+    secureLog.info('Verificación 2FA TOTP', { email: maskEmail(correo) });
+
     if (!correo || !codigo2fa) {
       return res.status(400).json({ message: "Correo y código son obligatorios" });
     }
 
     const [rows] = await pool.query(
-      "SELECT * FROM Usuarios WHERE correo = ?",
+      "SELECT * FROM Usuarios WHERE correo = ? LIMIT 1",
       [correo]
     );
 
-    if (rows.length === 0)
+    if (rows.length === 0) {
       return res.status(404).json({ message: "Usuario no encontrado." });
+    }
 
     const user = rows[0];
 
@@ -395,10 +426,10 @@ export const loginWith2FA = async (req, res) => {
     });
 
     if (!verified) {
+      secureLog.security('2FA_TOTP_INCORRECTO', user.id_usuario);
       return res.status(401).json({ message: "Código 2FA incorrecto ❌" });
     }
 
-    // ✅ Resetear intentos fallidos al hacer login exitoso con 2FA
     if (user.intentos_login_fallidos > 0) {
       await pool.query(
         'UPDATE Usuarios SET intentos_login_fallidos = 0 WHERE id_usuario = ?',
@@ -407,11 +438,10 @@ export const loginWith2FA = async (req, res) => {
     }
 
     const token = generateToken(user);
-
-    // 💾 GUARDAR SESIÓN ACTIVA
     await saveActiveSession(user.id_usuario, token, req);
-
     await registrarHistorialLogin(user, 'exitoso', 'Login con 2FA TOTP');
+
+    secureLog.security('2FA_TOTP_EXITOSO', user.id_usuario);
 
     res.json({
       message: "Inicio de sesión exitoso ✅",
@@ -425,7 +455,7 @@ export const loginWith2FA = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("Error en loginWith2FA:", error);
+    secureLog.error('Error en loginWith2FA', error);
     res.status(500).json({ message: "Error interno del servidor." });
   }
 };
@@ -437,16 +467,20 @@ export const verifyLoginCode = async (req, res) => {
   try {
     const { correo, codigo } = req.body;
 
-    if (!correo || !codigo)
+    secureLog.info('Verificación código Gmail 2FA', { email: maskEmail(correo) });
+
+    if (!correo || !codigo) {
       return res.status(400).json({ message: "Correo y código son obligatorios" });
+    }
 
     const [rows] = await pool.query(
-      "SELECT * FROM Usuarios WHERE correo = ? AND metodo_gmail_2fa = 1",
+      "SELECT * FROM Usuarios WHERE correo = ? AND metodo_gmail_2fa = 1 LIMIT 1",
       [correo]
     );
 
-    if (rows.length === 0)
+    if (rows.length === 0) {
       return res.status(404).json({ message: "Usuario no encontrado o sin Gmail 2FA" });
+    }
 
     const user = rows[0];
 
@@ -455,6 +489,7 @@ export const verifyLoginCode = async (req, res) => {
       user.ultimo_codigo_gmail !== codigo ||
       new Date(user.expiracion_codigo_gmail) < new Date()
     ) {
+      secureLog.security('CODIGO_GMAIL_INVALIDO', user.id_usuario);
       return res.status(401).json({ message: "Código inválido o expirado ❌" });
     }
 
@@ -463,7 +498,6 @@ export const verifyLoginCode = async (req, res) => {
       [user.id_usuario]
     );
 
-    // ✅ Resetear intentos fallidos al hacer login exitoso con Gmail 2FA
     if (user.intentos_login_fallidos > 0) {
       await pool.query(
         'UPDATE Usuarios SET intentos_login_fallidos = 0 WHERE id_usuario = ?',
@@ -472,11 +506,10 @@ export const verifyLoginCode = async (req, res) => {
     }
 
     const token = generateToken(user);
-
-    // 💾 GUARDAR SESIÓN ACTIVA
     await saveActiveSession(user.id_usuario, token, req);
-
     await registrarHistorialLogin(user, 'exitoso', 'Login con Gmail 2FA');
+
+    secureLog.security('GMAIL_2FA_EXITOSO', user.id_usuario);
 
     res.json({
       message: "✅ Verificación exitosa. Sesión iniciada.",
@@ -490,18 +523,18 @@ export const verifyLoginCode = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("❌ Error en verifyLoginCode:", error.message);
+    secureLog.error('Error en verifyLoginCode', error);
     res.status(500).json({ message: "Error interno del servidor" });
   }
 };
 
 // =========================================================
-// 🔥 REVOCAR OTRAS SESIONES (Cerrar sesión en otros dispositivos)
+// 🔥 REVOCAR OTRAS SESIONES
 // =========================================================
 export const closeOtherSessions = async (req, res) => {
   try {
-    const userId = req.user.id_usuario; // Viene del middleware authenticateToken
-    const currentToken = req.headers.authorization?.split(' ')[1]; // Token actual
+    const userId = req.user.id_usuario;
+    const currentToken = req.headers.authorization?.split(' ')[1];
 
     if (!currentToken) {
       return res.status(400).json({ message: "No se encontró token actual" });
@@ -509,28 +542,32 @@ export const closeOtherSessions = async (req, res) => {
 
     const sessionsRevoked = await revokeOtherSessions(userId, currentToken);
 
+    secureLog.security('SESIONES_REVOCADAS', userId, { 
+      cantidad: sessionsRevoked 
+    });
+
     res.json({
       message: `✅ Se cerraron ${sessionsRevoked} sesión(es) en otros dispositivos`,
       sessionsRevoked
     });
 
   } catch (error) {
-    console.error("❌ Error al revocar sesiones:", error.message);
+    secureLog.error('Error al revocar sesiones', error);
     res.status(500).json({ message: "Error al cerrar otras sesiones" });
   }
 };
+
 // =========================================================
 // ✅ VERIFICAR SI LA SESIÓN ACTUAL ES VÁLIDA
 // =========================================================
 export const checkSession = async (req, res) => {
   try {
-    // Si llegó aquí, significa que el middleware authenticateToken ya validó todo
     res.json({
       valid: true,
       message: "Sesión válida"
     });
   } catch (error) {
-    console.error("❌ Error al verificar sesión:", error.message);
+    secureLog.error('Error al verificar sesión', error);
     res.status(500).json({ message: "Error al verificar sesión" });
   }
 };

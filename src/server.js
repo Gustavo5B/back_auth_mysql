@@ -5,21 +5,32 @@ import express from 'express';
 import cors from 'cors';
 import cron from 'node-cron';
 import dotenv from 'dotenv';
+import helmet from 'helmet'; // ✅ AGREGAR (instalar: npm install helmet)
 import authRoutes from './routes/authRoutes.js';
 import recoveryRoutes from './routes/recoveryRoutes.js';
 import twoFactorRoutes from './routes/twoFactorRoutes.js';
+import gmail2faRoutes from "./routes/gmail2faRoutes.js";
 import { testConnection } from './config/db.js';
 import { cleanupExpiredCodes, sendRecoveryCode, generateCode } from './services/emailService.js';
-import gmail2faRoutes from "./routes/gmail2faRoutes.js";
 import { cleanupExpiredSessions } from './services/sessionService.js';
 
-
+// ✅ IMPORTAR MIDDLEWARES DE SEGURIDAD
+import { sanitizeInput } from './middlewares/sanitize.middleware.js';
+import { preventSQLInjection } from './middlewares/sql-injection.middleware.js';
 
 // =========================================================
 // ⚙️ CONFIGURACIÓN INICIAL
 // =========================================================
 dotenv.config();
 const app = express();
+
+// =========================================================
+// 🛡️ HELMET - HEADERS DE SEGURIDAD
+// =========================================================
+app.use(helmet({
+  contentSecurityPolicy: false, // Desactivar para evitar conflictos
+  crossOriginEmbedderPolicy: false
+}));
 
 // =========================================================
 // 🌐 CONFIGURACIÓN DE CORS
@@ -47,7 +58,11 @@ app.use(cors({
 // =========================================================
 // 🧩 MIDDLEWARES
 // =========================================================
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // Limitar tamaño de payload
+
+// ✅ APLICAR MIDDLEWARES DE SEGURIDAD (EN ESTE ORDEN)
+app.use(sanitizeInput);           // 1️⃣ Protección XSS
+app.use(preventSQLInjection);     // 2️⃣ Protección SQL Injection
 
 // =========================================================
 // 🚀 RUTAS PRINCIPALES
@@ -58,7 +73,6 @@ app.use('/api/2fa', twoFactorRoutes);
 app.use("/api/gmail-2fa", gmail2faRoutes);
 app.use('/api/gmail2fa', gmail2faRoutes); 
 
-
 // =========================================================
 // 🧪 RUTA DE PRUEBA DEL SERVIDOR
 // =========================================================
@@ -66,6 +80,13 @@ app.get('/', (req, res) => {
   res.json({
     message: '✅ Backend AUTH activo y corriendo correctamente.',
     cors: allowedOrigins,
+    security: {
+      xss: 'enabled',
+      sqlInjection: 'enabled',
+      csrf: 'not-needed (JWT-based)',
+      helmet: 'enabled',
+      https: 'enforced'
+    },
     timestamp: new Date().toISOString(),
   });
 });
@@ -75,10 +96,10 @@ app.get('/', (req, res) => {
 // =========================================================
 app.get('/api/test-email', async (req, res) => {
   try {
-    const testEmail = 'tucorreo@gmail.com'; // 📧 cambia por el correo que quieras probar
+    const testEmail = 'tucorreo@gmail.com';
     const code = generateCode();
 
-    console.log(`📧 Probando envío de correo a ${testEmail} con código ${code}...`);
+    console.log(`📧 Probando envío de correo a ${testEmail}...`);
     await sendRecoveryCode(testEmail, code);
 
     res.json({
@@ -108,6 +129,19 @@ cron.schedule('0 * * * *', async () => {
 });
 
 // =========================================================
+// 🕒 CRON JOB: Limpieza de sesiones antiguas cada día
+// =========================================================
+cron.schedule('0 0 * * *', async () => {
+  console.log('🧹 Ejecutando limpieza de sesiones antiguas...');
+  try {
+    await cleanupExpiredSessions();
+    console.log('✅ Limpieza de sesiones completada.');
+  } catch (err) {
+    console.error('❌ Error en limpieza de sesiones:', err.message);
+  }
+});
+
+// =========================================================
 // 🚀 INICIO DEL SERVIDOR
 // =========================================================
 const PORT = process.env.PORT || 4000;
@@ -115,23 +149,12 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, async () => {
   console.log(`✅ Servidor corriendo en el puerto ${PORT}`);
   console.log(`🌐 CORS habilitado para:`, allowedOrigins);
+  console.log(`🛡️ Protecciones activas: XSS, SQL Injection, JWT-Auth, Helmet`);
 
   try {
     await testConnection();
     console.log('🟢 Conexión MySQL verificada correctamente.');
   } catch (error) {
     console.error('❌ Error en la conexión MySQL:', error.message);
-  }
-});
-// =========================================================
-// 🕒 CRON JOB: Limpieza de sesiones antiguas cada día
-// =========================================================
-cron.schedule('0 0 * * *', async () => { // Se ejecuta a medianoche
-  console.log('🧹 Ejecutando limpieza de sesiones antiguas...');
-  try {
-    await cleanupExpiredSessions();
-    console.log('✅ Limpieza de sesiones completada.');
-  } catch (err) {
-    console.error('❌ Error en limpieza de sesiones:', err.message);
   }
 });
