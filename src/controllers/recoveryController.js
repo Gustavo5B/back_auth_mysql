@@ -5,17 +5,192 @@ import { generateCode, sendRecoveryCode } from "../services/emailService.js";
 
 dotenv.config();
 
+// =========================================================
+// 🛡️ FUNCIONES DE SANITIZACIÓN
+// =========================================================
+
+// Sanitizar email
+const sanitizeEmail = (email) => {
+  if (!email || typeof email !== 'string') return '';
+  return email
+    .trim()
+    .toLowerCase()
+    .replace(/[<>\"'`\\]/g, '')
+    .substring(0, 255);
+};
+
+// Validar formato de email
+const isValidEmail = (email) => {
+  const emailRegex = /^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+  return emailRegex.test(email) && email.length <= 255;
+};
+
+// Sanitizar código (solo dígitos)
+const sanitizeCode = (codigo) => {
+  if (!codigo || typeof codigo !== 'string') return '';
+  return codigo.trim().replace(/[^0-9]/g, '').substring(0, 6);
+};
+
+// Validar código de 6 dígitos
+const isValidCode = (codigo) => {
+  return /^\d{6}$/.test(codigo);
+};
+
+// Sanitizar contraseña (detectar patrones maliciosos)
+const sanitizePassword = (password) => {
+  if (!password || typeof password !== 'string') {
+    throw new Error('Contraseña requerida');
+  }
+
+  const maliciousPatterns = [
+    /<script/i,
+    /<\/script/i,
+    /javascript:/i,
+    /onerror=/i,
+    /onclick=/i,
+    /<iframe/i,
+    /eval\(/i,
+    /alert\(/i,
+    /onload=/i,
+    /<img/i,
+    /on\w+\s*=/i,
+    /data:/i,
+    /vbscript:/i,
+    /expression\(/i,
+    /url\(/i
+  ];
+
+  for (const pattern of maliciousPatterns) {
+    if (pattern.test(password)) {
+      throw new Error('La contraseña contiene caracteres no permitidos');
+    }
+  }
+
+  return password.trim();
+};
+
+// Validar fortaleza de contraseña
+const validatePasswordStrength = (password) => {
+  const errors = [];
+
+  if (password.length < 8) {
+    errors.push('Debe tener al menos 8 caracteres');
+  }
+
+  if (password.length > 128) {
+    errors.push('La contraseña es demasiado larga (máximo 128 caracteres)');
+  }
+
+  if (!/[A-Z]/.test(password)) {
+    errors.push('Debe contener al menos una mayúscula');
+  }
+
+  if (!/[a-z]/.test(password)) {
+    errors.push('Debe contener al menos una minúscula');
+  }
+
+  if (!/[0-9]/.test(password)) {
+    errors.push('Debe contener al menos un número');
+  }
+
+  if (!/[@$!%*?&#._-]/.test(password)) {
+    errors.push('Debe contener al menos un carácter especial (@$!%*?&#._-)');
+  }
+
+  // Lista de contraseñas comunes
+  const commonPasswords = [
+    '12345678', 'password', 'qwerty123', '123456789', 'abc12345',
+    'password123', '11111111', 'qwertyuiop', 'admin123', 'letmein123',
+    'welcome1', 'monkey123', 'dragon123', 'master123', 'login123',
+    'princess1', 'sunshine1', 'football1', 'iloveyou1', 'trustno1',
+    'password1', 'superman1', 'michael1', 'shadow123', 'charlie1'
+  ];
+
+  if (commonPasswords.includes(password.toLowerCase())) {
+    errors.push('Contraseña demasiado común. Elige una más segura');
+  }
+
+  // Detectar patrones repetitivos
+  if (/(.)\1{3,}/.test(password)) {
+    errors.push('La contraseña no puede tener más de 3 caracteres repetidos consecutivos');
+  }
+
+  // Detectar secuencias numéricas
+  if (/(?:012|123|234|345|456|567|678|789|890){2,}/.test(password)) {
+    errors.push('La contraseña no puede contener secuencias numéricas obvias');
+  }
+
+  return errors;
+};
+
+// =========================================================
+// 🔒 LOGGER SEGURO
+// =========================================================
+const secureLog = {
+  info: (message, metadata = {}) => {
+    const sanitized = { ...metadata };
+    delete sanitized.contrasena;
+    delete sanitized.password;
+    delete sanitized.nuevaContrasena;
+    delete sanitized.codigo;
+    delete sanitized.token;
+    
+    console.log(`ℹ️ ${message}`, Object.keys(sanitized).length > 0 ? sanitized : '');
+  },
+  
+  error: (message, error) => {
+    console.error(`❌ ${message}`, {
+      name: error.name,
+      code: error.code
+    });
+  },
+  
+  security: (action, userId, metadata = {}) => {
+    const sanitized = { ...metadata };
+    delete sanitized.codigo;
+    delete sanitized.password;
+    
+    console.log(`🔐 SECURITY [${action}] User:${userId || 'unknown'}`, {
+      timestamp: new Date().toISOString(),
+      ...sanitized
+    });
+  }
+};
+
+// =========================================================
+// 🔒 ENMASCARAR EMAIL (para logs)
+// =========================================================
+const maskEmail = (email) => {
+  if (!email) return 'correo oculto';
+  
+  const [localPart, domain] = email.split('@');
+  
+  if (!domain) return '***@***';
+  
+  const maskedLocal = localPart.length > 4
+    ? localPart.substring(0, 2) + '***' + localPart.substring(localPart.length - 2)
+    : '***';
+  
+  const domainParts = domain.split('.');
+  const maskedDomain = domainParts.length > 1
+    ? domainParts[0].substring(0, 1) + '***.' + domainParts.slice(1).join('.')
+    : '***';
+  
+  return `${maskedLocal}@${maskedDomain}`;
+};
+
+// =========================================================
 // ✅ HELPER: Reintentar operaciones con la BD
+// =========================================================
 const retryOperation = async (operation, retries = 3, delay = 1000) => {
   for (let i = 0; i < retries; i++) {
     try {
       return await operation();
     } catch (error) {
-      console.log(`⚠️ Intento ${i + 1}/${retries} falló:`, error.code || error.message);
+      secureLog.info(`Intento ${i + 1}/${retries} falló`, { errorCode: error.code });
       
       if (i === retries - 1) throw error;
       
-      // Esperar antes de reintentar (exponential backoff)
       await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
     }
   }
@@ -25,25 +200,35 @@ const retryOperation = async (operation, retries = 3, delay = 1000) => {
 // 🔒 HELPER: Calcular tiempo de bloqueo progresivo
 // =========================================================
 const calcularTiempoBloqueoRecuperacion = (bloqueosTotales) => {
-  if (bloqueosTotales === 0) return 15;      // 15 minutos (primer bloqueo)
-  if (bloqueosTotales === 1) return 30;      // 30 minutos (segundo bloqueo)
-  return 60;                                  // 60 minutos (tercer bloqueo en adelante)
+  if (bloqueosTotales === 0) return 15;
+  if (bloqueosTotales === 1) return 30;
+  if (bloqueosTotales === 2) return 60;
+  return 120; // 2 horas para bloqueos recurrentes
 };
 
 // =========================================================
-// 📧 SOLICITAR CÓDIGO DE RECUPERACIÓN (CON RATE LIMITING MEJORADO)
+// 📧 SOLICITAR CÓDIGO DE RECUPERACIÓN
 // =========================================================
 export const requestRecoveryCode = async (req, res) => {
   let connection;
   
   try {
-    const { correo } = req.body;
+    let { correo } = req.body;
 
+    // ✅ VALIDAR CAMPO REQUERIDO
     if (!correo) {
       return res.status(400).json({ message: "El correo es obligatorio" });
     }
 
-    console.log(`📧 Solicitud de recuperación para: ${correo}`);
+    // ✅ SANITIZAR CORREO
+    correo = sanitizeEmail(correo);
+
+    // ✅ VALIDAR FORMATO
+    if (!isValidEmail(correo)) {
+      return res.status(400).json({ message: "Formato de correo inválido" });
+    }
+
+    secureLog.info('Solicitud de recuperación', { email: maskEmail(correo) });
 
     // ✅ OBTENER CONEXIÓN
     connection = await retryOperation(() => pool.getConnection());
@@ -56,11 +241,11 @@ export const requestRecoveryCode = async (req, res) => {
     );
 
     if (users.length === 0) {
-      console.log(`❌ Correo no encontrado: ${correo}`);
+      secureLog.security('RECUPERACION_CORREO_NO_ENCONTRADO', null, { email: maskEmail(correo) });
       // 🔒 SEGURIDAD: No revelar si el correo existe
       return res.json({ 
         message: "Si el correo existe, recibirás un código de recuperación",
-        correo: correo
+        correo: maskEmail(correo)
       });
     }
 
@@ -74,14 +259,16 @@ export const requestRecoveryCode = async (req, res) => {
       const desbloqueo = new Date(user.bloqueado_recuperacion_hasta);
 
       if (ahora < desbloqueo) {
-        // 🔒 AÚN ESTÁ BLOQUEADO
         const minutosRestantes = Math.ceil((desbloqueo - ahora) / 60000);
         const horaDesbloqueo = desbloqueo.toLocaleTimeString('es-MX', {
           hour: '2-digit',
           minute: '2-digit'
         });
 
-        console.log(`🔒 Recuperación bloqueada hasta: ${horaDesbloqueo}`);
+        secureLog.security('RECUPERACION_BLOQUEADA', user.id_usuario, { 
+          minutosRestantes,
+          email: maskEmail(correo)
+        });
 
         return res.status(429).json({
           blocked: true,
@@ -91,7 +278,7 @@ export const requestRecoveryCode = async (req, res) => {
         });
       } else {
         // ✅ DESBLOQUEO AUTOMÁTICO
-        console.log('✅ Desbloqueando recuperación automáticamente...');
+        secureLog.info('Desbloqueando recuperación automáticamente', { userId: user.id_usuario });
         await retryOperation(() =>
           connection.query(
             `UPDATE Usuarios 
@@ -115,9 +302,8 @@ export const requestRecoveryCode = async (req, res) => {
     let intentosActuales = user.intentos_recuperacion || 0;
     const ultimoIntento = user.ultimo_intento_recuperacion ? new Date(user.ultimo_intento_recuperacion) : null;
 
-    // Si el último intento fue hace más de 15 minutos, resetear contador
     if (!ultimoIntento || ultimoIntento < hace15Min) {
-      console.log('⏰ Ventana de 15 minutos expirada, reseteando contador');
+      secureLog.info('Ventana de 15 minutos expirada, reseteando contador', { userId: user.id_usuario });
       intentosActuales = 0;
     }
 
@@ -125,10 +311,12 @@ export const requestRecoveryCode = async (req, res) => {
     // 4️⃣ VERIFICAR LÍMITE DE INTENTOS
     // ============================================
     const nuevoIntentos = intentosActuales + 1;
-    console.log(`📊 Intento de recuperación #${nuevoIntentos}/3`);
+    secureLog.info('Intento de recuperación', { 
+      userId: user.id_usuario, 
+      intento: `${nuevoIntentos}/3` 
+    });
 
     if (nuevoIntentos > 3) {
-      // 🔒 BLOQUEAR TEMPORALMENTE
       const tiempoBloqueo = calcularTiempoBloqueoRecuperacion(user.total_bloqueos_recuperacion || 0);
 
       await retryOperation(() =>
@@ -143,7 +331,10 @@ export const requestRecoveryCode = async (req, res) => {
         )
       );
 
-      console.log(`🔒 Recuperación bloqueada por ${tiempoBloqueo} minutos`);
+      secureLog.security('RECUPERACION_BLOQUEADA_POR_INTENTOS', user.id_usuario, {
+        tiempoBloqueo,
+        bloqueosTotales: (user.total_bloqueos_recuperacion || 0) + 1
+      });
 
       return res.status(429).json({
         blocked: true,
@@ -193,31 +384,32 @@ export const requestRecoveryCode = async (req, res) => {
     // ============================================
     try {
       await sendRecoveryCode(correo, codigo);
-      console.log(`✅ Código enviado a ${correo}: ${codigo}`);
+      secureLog.security('CODIGO_RECUPERACION_ENVIADO', user.id_usuario, { 
+        email: maskEmail(correo) 
+      });
     } catch (emailError) {
-      console.error('❌ Error al enviar email:', emailError);
+      secureLog.error('Error al enviar email de recuperación', emailError);
     }
 
     const intentosRestantes = 3 - nuevoIntentos;
-    console.log(`✅ Código enviado. Intentos restantes: ${intentosRestantes}`);
 
     res.json({ 
       message: "Si el correo existe, recibirás un código de recuperación",
-      correo: correo,
+      correo: maskEmail(correo),
       attemptsRemaining: intentosRestantes,
       warning: intentosRestantes === 1 ? "⚠️ Este es tu último intento antes del bloqueo temporal." : null
     });
 
   } catch (error) {
-    console.error("❌ Error en requestRecoveryCode:", error);
+    secureLog.error('Error en requestRecoveryCode', error);
     
-    if (error.code === 'ECONNRESET') {
-      res.status(503).json({ 
+    if (error.code === 'ECONNRESET' || error.code === 'PROTOCOL_CONNECTION_LOST') {
+      return res.status(503).json({ 
         message: "Servicio temporalmente no disponible. Por favor, intenta de nuevo." 
       });
-    } else {
-      res.status(500).json({ message: "Error interno del servidor" });
     }
+    
+    res.status(500).json({ message: "Error interno del servidor" });
   } finally {
     if (connection) connection.release();
   }
@@ -230,11 +422,27 @@ export const validateRecoveryCode = async (req, res) => {
   let connection;
   
   try {
-    const { correo, codigo } = req.body;
+    let { correo, codigo } = req.body;
 
+    // ✅ VALIDAR CAMPOS REQUERIDOS
     if (!correo || !codigo) {
       return res.status(400).json({ message: "Correo y código son obligatorios" });
     }
+
+    // ✅ SANITIZAR ENTRADAS
+    correo = sanitizeEmail(correo);
+    codigo = sanitizeCode(codigo);
+
+    // ✅ VALIDAR FORMATOS
+    if (!isValidEmail(correo)) {
+      return res.status(400).json({ message: "Formato de correo inválido" });
+    }
+
+    if (!isValidCode(codigo)) {
+      return res.status(400).json({ message: "El código debe ser de 6 dígitos" });
+    }
+
+    secureLog.info('Validando código de recuperación', { email: maskEmail(correo) });
 
     connection = await retryOperation(() => pool.getConnection());
 
@@ -248,16 +456,19 @@ export const validateRecoveryCode = async (req, res) => {
     );
 
     if (codes.length === 0) {
+      secureLog.security('CODIGO_RECUPERACION_INVALIDO', null, { email: maskEmail(correo) });
       return res.status(401).json({ 
         valid: false, 
         message: "Código inválido o expirado" 
       });
     }
 
+    secureLog.security('CODIGO_RECUPERACION_VALIDO', null, { email: maskEmail(correo) });
+
     res.json({ valid: true, message: "Código válido" });
 
   } catch (error) {
-    console.error("❌ Error en validateRecoveryCode:", error);
+    secureLog.error('Error en validateRecoveryCode', error);
     res.status(500).json({ message: "Error interno del servidor" });
   } finally {
     if (connection) connection.release();
@@ -271,28 +482,49 @@ export const resetPassword = async (req, res) => {
   let connection;
   
   try {
-    const { correo, codigo, nuevaContrasena } = req.body;
+    let { correo, codigo, nuevaContrasena } = req.body;
 
+    // ✅ VALIDAR CAMPOS REQUERIDOS
     if (!correo || !codigo || !nuevaContrasena) {
       return res.status(400).json({ message: "Todos los campos son obligatorios" });
     }
 
-    if (nuevaContrasena.length < 8) {
+    // ✅ SANITIZAR CORREO
+    correo = sanitizeEmail(correo);
+    if (!isValidEmail(correo)) {
+      return res.status(400).json({ message: "Formato de correo inválido" });
+    }
+
+    // ✅ SANITIZAR CÓDIGO
+    codigo = sanitizeCode(codigo);
+    if (!isValidCode(codigo)) {
+      return res.status(400).json({ message: "El código debe ser de 6 dígitos" });
+    }
+
+    // ✅ SANITIZAR CONTRASEÑA
+    try {
+      nuevaContrasena = sanitizePassword(nuevaContrasena);
+    } catch (error) {
+      return res.status(400).json({ message: error.message });
+    }
+
+    // ✅ VALIDAR FORTALEZA DE CONTRASEÑA
+    const passwordErrors = validatePasswordStrength(nuevaContrasena);
+    if (passwordErrors.length > 0) {
       return res.status(400).json({ 
-        message: "La contraseña debe tener al menos 8 caracteres" 
+        message: "Contraseña insegura",
+        errors: passwordErrors
       });
     }
 
-    if (!/(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/.test(nuevaContrasena)) {
-      return res.status(400).json({ 
-        message: "La contraseña debe contener mayúsculas, minúsculas y números" 
-      });
-    }
+    secureLog.info('Restableciendo contraseña', { email: maskEmail(correo) });
 
     connection = await retryOperation(() => pool.getConnection());
     await connection.beginTransaction();
 
-    // Verificar código
+    // ============================================
+    // 1️⃣ VERIFICAR CÓDIGO
+    // ============================================
     const [codes] = await retryOperation(() =>
       connection.query(
         `SELECT * FROM codigosrecuperacion
@@ -304,12 +536,15 @@ export const resetPassword = async (req, res) => {
 
     if (codes.length === 0) {
       await connection.rollback();
+      secureLog.security('RESET_PASSWORD_CODIGO_INVALIDO', null, { email: maskEmail(correo) });
       return res.status(401).json({ message: "Código inválido o expirado" });
     }
 
-    // Verificar usuario
+    // ============================================
+    // 2️⃣ VERIFICAR USUARIO
+    // ============================================
     const [users] = await retryOperation(() =>
-      connection.query('SELECT id_usuario FROM Usuarios WHERE correo = ?', [correo])
+      connection.query('SELECT id_usuario, contrasena FROM Usuarios WHERE correo = ?', [correo])
     );
 
     if (users.length === 0) {
@@ -317,25 +552,47 @@ export const resetPassword = async (req, res) => {
       return res.status(404).json({ message: "Usuario no encontrado" });
     }
 
-    // Actualizar contraseña
-    const hashedPassword = await bcrypt.hash(nuevaContrasena, 10);
+    const user = users[0];
+
+    // ============================================
+    // 3️⃣ VERIFICAR QUE NO SEA LA MISMA CONTRASEÑA
+    // ============================================
+    const isSamePassword = await bcrypt.compare(nuevaContrasena, user.contrasena);
+    if (isSamePassword) {
+      await connection.rollback();
+      return res.status(400).json({ 
+        message: "La nueva contraseña no puede ser igual a la anterior" 
+      });
+    }
+
+    // ============================================
+    // 4️⃣ ACTUALIZAR CONTRASEÑA
+    // ============================================
+    const saltRounds = 12;
+    const hashedPassword = await bcrypt.hash(nuevaContrasena, saltRounds);
 
     await retryOperation(() =>
       connection.query('UPDATE Usuarios SET contrasena = ? WHERE correo = ?', [hashedPassword, correo])
     );
 
-    // Marcar código como usado
+    // ============================================
+    // 5️⃣ MARCAR CÓDIGO COMO USADO
+    // ============================================
     await retryOperation(() =>
       connection.query('UPDATE codigosrecuperacion SET usado = TRUE WHERE correo = ?', [correo])
     );
 
-    // ✅ RESETEAR CONTADORES DE RECUPERACIÓN
+    // ============================================
+    // 6️⃣ RESETEAR CONTADORES DE RECUPERACIÓN
+    // ============================================
     await retryOperation(() =>
       connection.query(
         `UPDATE Usuarios 
          SET intentos_recuperacion = 0,
              bloqueado_recuperacion_hasta = NULL,
-             ultimo_intento_recuperacion = NULL
+             ultimo_intento_recuperacion = NULL,
+             intentos_login_fallidos = 0,
+             bloqueado_hasta = NULL
          WHERE correo = ?`,
         [correo]
       )
@@ -343,13 +600,16 @@ export const resetPassword = async (req, res) => {
 
     await connection.commit();
     
-    console.log(`✅ Contraseña actualizada para ${correo}`);
+    secureLog.security('PASSWORD_RESTABLECIDA', user.id_usuario, { email: maskEmail(correo) });
     
-    res.json({ message: "Contraseña actualizada exitosamente" });
+    res.json({ 
+      message: "Contraseña actualizada exitosamente ✅",
+      success: true
+    });
 
   } catch (error) {
     if (connection) await connection.rollback();
-    console.error("❌ Error en resetPassword:", error);
+    secureLog.error('Error en resetPassword', error);
     res.status(500).json({ message: "Error interno del servidor" });
   } finally {
     if (connection) connection.release();
@@ -364,8 +624,8 @@ export const cleanupExpiredCodes = async () => {
     const [result] = await retryOperation(() =>
       pool.query('DELETE FROM codigosrecuperacion WHERE fecha_expiracion < NOW() OR usado = TRUE')
     );
-    console.log(`🧹 Códigos eliminados: ${result.affectedRows}`);
+    secureLog.info('Códigos expirados eliminados', { cantidad: result.affectedRows });
   } catch (error) {
-    console.error('❌ Error al limpiar códigos:', error);
+    secureLog.error('Error al limpiar códigos', error);
   }
 };
