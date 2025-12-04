@@ -36,7 +36,7 @@ app.use(helmet({
 // 🌐 CONFIGURACIÓN DE CORS
 // =========================================================
 const allowedOrigins = [
-  'https://front-auth-two.vercel.app', // Producción
+  'https://front-auth-eight.vercel.app', // Producción
   'http://localhost:4200',             // Local
 ];
 
