@@ -4,9 +4,6 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-// =========================================================
-// 🔒 LOGGER SEGURO - NO REGISTRA TOKENS NI DATOS SENSIBLES
-// =========================================================
 const secureLog = {
   info: (message, metadata = {}) => {
     const sanitized = { ...metadata };
@@ -22,7 +19,6 @@ const secureLog = {
     console.error(`❌ ${message}`, {
       name: error.name,
       code: error.code
-      // ❌ NO incluir: error.message (puede contener tokens), error.stack
     });
   },
   
@@ -34,14 +30,10 @@ const secureLog = {
   }
 };
 
-// =========================================================
-// 🔐 MIDDLEWARE: Verificar Token JWT + Sesión Activa
-// =========================================================
 export const authenticateToken = async (req, res, next) => {
   try {
-    // 1️⃣ Obtener token del header
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; // "Bearer TOKEN"
+    const token = authHeader && authHeader.split(' ')[1];
 
     if (!token) {
       secureLog.security('AUTH_NO_TOKEN', null);
@@ -51,13 +43,12 @@ export const authenticateToken = async (req, res, next) => {
       });
     }
 
-    // 2️⃣ Verificar que el token sea válido (JWT)
     let decoded;
     try {
       decoded = jwt.verify(token, process.env.JWT_SECRET, {
-        algorithms: ['HS256'],      // ✅ CRÍTICO: Solo permitir HS256
-        issuer: 'nub-studio',       // ✅ Validar emisor
-        audience: 'nub-users'        // ✅ Validar audiencia
+        algorithms: ['HS256'],
+        issuer: 'nub-studio',
+        audience: 'nub-users'
       });
     } catch (error) {
       if (error.name === 'TokenExpiredError') {
@@ -77,7 +68,6 @@ export const authenticateToken = async (req, res, next) => {
         });
       }
 
-      // Detectar algoritmo no permitido
       if (error.message && error.message.includes('algorithm')) {
         secureLog.security('INVALID_ALGORITHM_ATTEMPT', null);
         return res.status(401).json({ 
@@ -93,7 +83,6 @@ export const authenticateToken = async (req, res, next) => {
       });
     }
 
-    // 3️⃣ Verificar que la sesión esté activa en la BD (whitelist)
     const sessionExists = await isSessionValid(token);
     
     if (!sessionExists) {
@@ -104,21 +93,14 @@ export const authenticateToken = async (req, res, next) => {
       });
     }
 
-    // 4️⃣ Todo OK, agregar info del usuario al request
-    // ✅ IMPORTANTE: Usar 'sub' como ID de usuario (estándar JWT)
     req.user = {
-      id_usuario: parseInt(decoded.sub), // El ID viene en 'sub'
-      jti: decoded.jti                    // JWT ID único
+      id_usuario: parseInt(decoded.sub),
+      jti: decoded.jti
     };
     
     req.token = token;
 
-    // ✅ Logs seguros en cada evento:
-secureLog.security('AUTH_NO_TOKEN', null);
-secureLog.security('TOKEN_EXPIRED', null);
-secureLog.security('INVALID_TOKEN', null);
-secureLog.security('SESSION_REVOKED', decoded.sub);
-secureLog.security('AUTH_SUCCESS', decoded.sub);
+    secureLog.security('AUTH_SUCCESS', decoded.sub);
 
     next();
 

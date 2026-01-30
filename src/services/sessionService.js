@@ -14,14 +14,20 @@ export const hashToken = (token) => {
 export const saveActiveSession = async (userId, token, req) => {
   try {
     const tokenHash = hashToken(token);
-    const dispositivo = extractDeviceInfo(req.headers['user-agent']);
-    const ip = req.ip || req.connection.remoteAddress || 'Desconocida';
+    const ip = req.headers['x-forwarded-for']?.split(',')[0] || 
+               req.socket.remoteAddress || 
+               req.connection.remoteAddress || 
+               'unknown';
     const userAgent = req.headers['user-agent'] || 'Desconocido';
+    const fechaExpiracion = new Date();
+    fechaExpiracion.setHours(fechaExpiracion.getHours() + 24); // 24 horas
 
+    // ✅ COLUMNAS CORRECTAS: token, token_hash, fecha_expiracion, ip_address, user_agent
     await pool.query(
-      `INSERT INTO sesiones_activas (id_usuario, token_hash, dispositivo, ip, user_agent) 
-       VALUES (?, ?, ?, ?, ?)`,
-      [userId, tokenHash, dispositivo, ip, userAgent]
+      `INSERT INTO sesiones_activas 
+       (id_usuario, token, token_hash, fecha_expiracion, ip_address, user_agent, activa) 
+       VALUES (?, ?, ?, ?, ?, ?, 1)`,
+      [userId, token, tokenHash, fechaExpiracion, ip, userAgent]
     );
 
     console.log(`✅ Sesión guardada para usuario ${userId}`);
@@ -39,12 +45,20 @@ export const isSessionValid = async (token) => {
   try {
     const tokenHash = hashToken(token);
     
+    // ✅ COLUMNA CORRECTA: id_sesion (no "id")
     const [rows] = await pool.query(
-      'SELECT id FROM sesiones_activas WHERE token_hash = ?',
+      `SELECT id_sesion 
+       FROM sesiones_activas 
+       WHERE token_hash = ? 
+       AND activa = 1 
+       AND fecha_expiracion > NOW()`,
       [tokenHash]
     );
 
-    return rows.length > 0;
+    const isValid = rows.length > 0;
+    console.log(`🔍 Sesión válida: ${isValid ? 'SÍ ✅' : 'NO ❌'}`);
+    
+    return isValid;
   } catch (error) {
     console.error('❌ Error al verificar sesión:', error.message);
     return false;
@@ -94,30 +108,14 @@ export const revokeOtherSessions = async (userId, currentToken) => {
 };
 
 // =========================================================
-// 📱 EXTRAER INFO DEL DISPOSITIVO
-// =========================================================
-const extractDeviceInfo = (userAgent) => {
-  if (!userAgent) return 'Desconocido';
-
-  // Detectar tipo de dispositivo
-  if (/mobile/i.test(userAgent)) return 'Móvil';
-  if (/tablet/i.test(userAgent)) return 'Tablet';
-  if (/windows/i.test(userAgent)) return 'Windows PC';
-  if (/mac/i.test(userAgent)) return 'Mac';
-  if (/linux/i.test(userAgent)) return 'Linux';
-  
-  return 'Navegador';
-};
-
-// =========================================================
 // 🧹 LIMPIAR SESIONES EXPIRADAS (opcional, para cron job)
 // =========================================================
 export const cleanupExpiredSessions = async () => {
   try {
-    // Eliminar sesiones inactivas por más de 30 días
     const [result] = await pool.query(
       `DELETE FROM sesiones_activas 
-       WHERE ultimo_uso < DATE_SUB(NOW(), INTERVAL 30 DAY)`
+       WHERE fecha_expiracion < NOW() 
+       OR ultima_actividad < DATE_SUB(NOW(), INTERVAL 30 DAY)`
     );
 
     console.log(`🧹 ${result.affectedRows} sesiones antiguas eliminadas`);

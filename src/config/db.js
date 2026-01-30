@@ -8,15 +8,13 @@ export const pool = mysql.createPool({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
-  port: parseInt(process.env.DB_PORT, 10), // ✅ Railway usa puerto personalizado
+  port: parseInt(process.env.DB_PORT, 10),
   
-  // ✅ CONFIGURACIÓN OPTIMIZADA PARA RAILWAY
+  // ✅ CONFIGURACIÓN CORRECTA (sin acquireTimeout ni timeout)
   waitForConnections: true,
-  connectionLimit: 10,              // ✅ Railway soporta más conexiones
+  connectionLimit: 10,
   queueLimit: 0,
-  connectTimeout: 60000,            // ✅ 60 segundos
-  acquireTimeout: 60000,
-  timeout: 60000,
+  connectTimeout: 60000,        // ✅ Este SÍ es válido
   enableKeepAlive: true,
   keepAliveInitialDelay: 0,
   
@@ -24,48 +22,45 @@ export const pool = mysql.createPool({
   multipleStatements: false,
   dateStrings: true,
   supportBigNumbers: true,
-  bigNumberStrings: true
+  bigNumberStrings: true,
+  charset: 'utf8mb4',
+  timezone: '+00:00'
 });
 
 // Alias para compatibilidad
 export const poolPromise = pool;
 
-// Test de conexión mejorado
+// Test de conexión
 export const testConnection = async () => {
   let connection;
   try {
     connection = await pool.getConnection();
     await connection.ping();
-    console.log(`✅ Conectado a MySQL Railway (${process.env.DB_NAME})`);
+    console.log(`🟢 Conectado a MySQL (${process.env.DB_NAME})`);
     console.log(`📍 Host: ${process.env.DB_HOST}:${process.env.DB_PORT}`);
     return true;
   } catch (error) {
     console.error("❌ Error de conexión a MySQL:", error.message);
     console.error("💡 Verifica que:");
-    console.error("   - Las credenciales en Render Environment sean correctas");
-    console.error("   - Railway esté activo y accesible");
+    console.error("   - MySQL esté corriendo en localhost:3306");
+    console.error("   - Las credenciales en .env sean correctas");
+    console.error("   - La base de datos 'nuub_studio' exista");
     return false;
   } finally {
     if (connection) connection.release();
   }
 };
 
-// ✅ Manejo de errores del pool
-pool.on('connection', (connection) => {
-  console.log('🔌 Nueva conexión MySQL Railway establecida');
+// Manejo de errores del pool
+pool.on('connection', () => {
+  console.log('🔌 Nueva conexión MySQL establecida');
 });
 
 pool.on('error', (err) => {
-  console.error('❌ Error inesperado en el pool de MySQL:', err);
-  if (err.code === 'PROTOCOL_CONNECTION_LOST') {
-    console.error('💡 Conexión perdida con MySQL. Se reconectará automáticamente.');
-  }
-  if (err.code === 'ECONNRESET') {
-    console.error('💡 Conexión resetada. Reintentando...');
-  }
+  console.error('❌ Error inesperado en el pool de MySQL:', err.message);
 });
 
-// ✅ Helper para ejecutar queries con reintentos
+// Helper para ejecutar queries con reintentos
 export const queryWithRetry = async (sql, params, maxRetries = 3) => {
   let lastError;
   
@@ -78,7 +73,6 @@ export const queryWithRetry = async (sql, params, maxRetries = 3) => {
       console.error(`❌ Intento ${i + 1}/${maxRetries} falló:`, error.message);
       
       if (i < maxRetries - 1) {
-        // Esperar antes de reintentar (exponential backoff)
         await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000));
       }
     }
@@ -86,6 +80,3 @@ export const queryWithRetry = async (sql, params, maxRetries = 3) => {
   
   throw lastError;
 };
-
-// Auto-test al iniciar
-testConnection();
