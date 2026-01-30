@@ -10,6 +10,14 @@ import authRoutes from './routes/authRoutes.js';
 import recoveryRoutes from './routes/recoveryRoutes.js';
 import twoFactorRoutes from './routes/twoFactorRoutes.js';
 import gmail2faRoutes from "./routes/gmail2faRoutes.js";
+import obrasRoutes from './routes/obrasRoutes.js';
+
+// Después de las rutas de obras:
+import categoriasRoutes from './routes/categoriasRoutes.js';
+import artistasRoutes from './routes/Artistasroutes.js';
+import etiquetasRoutes from './routes/etiquetasRoutes.js';
+import imagenesRoutes from './routes/imagenesRoutes.js';
+
 import { testConnection } from './config/db.js';
 import { cleanupExpiredCodes, sendRecoveryCode, generateCode } from './services/emailService.js';
 import { cleanupExpiredSessions } from './services/sessionService.js';
@@ -71,7 +79,18 @@ app.use('/api/auth', authRoutes);
 app.use('/api/recovery', recoveryRoutes);
 app.use('/api/2fa', twoFactorRoutes);
 app.use("/api/gmail-2fa", gmail2faRoutes);
-app.use('/api/gmail2fa', gmail2faRoutes); 
+app.use('/api/gmail2fa', gmail2faRoutes);
+app.use('/api/imagenes', imagenesRoutes);
+
+// =========================================================
+// 🚀 RUTAS OBRAS
+// =========================================================
+
+app.use('/api/obras', obrasRoutes);
+app.use('/api/categorias', categoriasRoutes);
+app.use('/api/artistas', artistasRoutes);
+app.use('/api/etiquetas', etiquetasRoutes);
+
 
 // =========================================================
 // 🧪 RUTA DE PRUEBA DEL SERVIDOR
