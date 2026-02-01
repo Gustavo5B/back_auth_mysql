@@ -1,4 +1,5 @@
 import express from 'express';
+import { upload } from '../config/cloudinaryConfig.js'; // ← ✅ AGREGADO
 import { 
   listarObras,
   obtenerObraPorId,
@@ -43,8 +44,10 @@ router.get('/etiqueta/:slug', validarSlug, obtenerObrasPorEtiqueta);
 router.get('/slug/:slug', validarSlug, obtenerObraPorSlug);
 router.get('/:id', validarIdObra, obtenerObraPorId);
 
-// ✅ AGREGAR RUTAS PROTEGIDAS
-router.post('/', crearObra);
-router.put('/:id', actualizarObra);
+// =========================================================
+// 🔒 RUTAS PROTEGIDAS (CON UPLOAD DE IMAGEN)
+// =========================================================
+router.post('/', upload.single('imagen'), crearObra);        // ← ✅ MODIFICADO
+router.put('/:id', upload.single('imagen'), actualizarObra); // ← ✅ MODIFICADO
 
 export default router;

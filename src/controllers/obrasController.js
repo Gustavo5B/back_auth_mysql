@@ -562,6 +562,7 @@ export const crearObra = async (req, res) => {
 
     const id_usuario = req.user?.id_usuario || 1;
 
+    // ✅ VALIDACIONES
     if (!titulo || !descripcion || !id_categoria || !id_artista) {
       return res.status(400).json({
         success: false,
@@ -569,12 +570,25 @@ export const crearObra = async (req, res) => {
       });
     }
 
+    // ✅ VERIFICAR QUE SE SUBIÓ LA IMAGEN
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'La imagen es obligatoria'
+      });
+    }
+
     // ✅ GENERAR SLUG
     const slug = titulo
       .toLowerCase()
       .trim()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '');
+
+    // ✅ OBTENER URL DE LA IMAGEN SUBIDA A CLOUDINARY
+    const imagen_principal = req.file.path;
 
     const query = `
       INSERT INTO obras (
@@ -585,10 +599,11 @@ export const crearObra = async (req, res) => {
         id_artista,
         anio_creacion,
         tecnica,
+        imagen_principal,
         destacada,
         id_usuario_creacion,
         activa
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
     `;
 
     const [resultado] = await pool.query(query, [
@@ -599,25 +614,34 @@ export const crearObra = async (req, res) => {
       id_artista,
       anio_creacion || null,
       tecnica || null,
+      imagen_principal,
       destacada ? 1 : 0,
       id_usuario
     ]);
 
+    secureLog.info('Obra creada exitosamente', { 
+      id_obra: resultado.insertId,
+      imagen: imagen_principal 
+    });
+
     res.status(201).json({
       success: true,
       message: 'Obra creada exitosamente',
-      data: { id_obra: resultado.insertId }
+      data: { 
+        id_obra: resultado.insertId,
+        slug,
+        imagen_principal 
+      }
     });
 
   } catch (error) {
-    console.error('❌ Error al crear obra:', error);
+    secureLog.error('Error al crear obra', error);
     res.status(500).json({
       success: false,
       message: 'Error al crear la obra'
     });
   }
 };
-
 // =========================================================
 // ✏️ ACTUALIZAR OBRA
 // =========================================================
