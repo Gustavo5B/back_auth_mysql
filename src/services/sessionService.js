@@ -19,15 +19,13 @@ export const saveActiveSession = async (userId, token, req) => {
                req.connection.remoteAddress || 
                'unknown';
     const userAgent = req.headers['user-agent'] || 'Desconocido';
-    const fechaExpiracion = new Date();
-    fechaExpiracion.setHours(fechaExpiracion.getHours() + 24); // 24 horas
-
-    // ✅ COLUMNAS CORRECTAS: token, token_hash, fecha_expiracion, ip_address, user_agent
+    
+    // ✅ POSTGRESQL: Usar INTERVAL para fecha de expiración
     await pool.query(
       `INSERT INTO sesiones_activas 
        (id_usuario, token, token_hash, fecha_expiracion, ip_address, user_agent, activa) 
-       VALUES (?, ?, ?, ?, ?, ?, 1)`,
-      [userId, token, tokenHash, fechaExpiracion, ip, userAgent]
+       VALUES ($1, $2, $3, NOW() + INTERVAL '24 hours', $4, $5, TRUE)`,
+      [userId, token, tokenHash, ip, userAgent]
     );
 
     console.log(`✅ Sesión guardada para usuario ${userId}`);
@@ -45,17 +43,17 @@ export const isSessionValid = async (token) => {
   try {
     const tokenHash = hashToken(token);
     
-    // ✅ COLUMNA CORRECTA: id_sesion (no "id")
-    const [rows] = await pool.query(
+    // ✅ POSTGRESQL
+    const result = await pool.query(
       `SELECT id_sesion 
        FROM sesiones_activas 
-       WHERE token_hash = ? 
-       AND activa = 1 
+       WHERE token_hash = $1
+       AND activa = TRUE
        AND fecha_expiracion > NOW()`,
       [tokenHash]
     );
 
-    const isValid = rows.length > 0;
+    const isValid = result.rows.length > 0;
     console.log(`🔍 Sesión válida: ${isValid ? 'SÍ ✅' : 'NO ❌'}`);
     
     return isValid;
@@ -72,8 +70,9 @@ export const removeSession = async (token) => {
   try {
     const tokenHash = hashToken(token);
     
+    // ✅ POSTGRESQL
     await pool.query(
-      'DELETE FROM sesiones_activas WHERE token_hash = ?',
+      'DELETE FROM sesiones_activas WHERE token_hash = $1',
       [tokenHash]
     );
 
@@ -92,15 +91,16 @@ export const revokeOtherSessions = async (userId, currentToken) => {
   try {
     const currentTokenHash = hashToken(currentToken);
 
-    const [result] = await pool.query(
+    // ✅ POSTGRESQL
+    const result = await pool.query(
       `DELETE FROM sesiones_activas 
-       WHERE id_usuario = ? 
-       AND token_hash != ?`,
+       WHERE id_usuario = $1
+       AND token_hash != $2`,
       [userId, currentTokenHash]
     );
 
-    console.log(`🔥 ${result.affectedRows} sesiones revocadas para usuario ${userId}`);
-    return result.affectedRows;
+    console.log(`🔥 ${result.rowCount} sesiones revocadas para usuario ${userId}`);
+    return result.rowCount;
   } catch (error) {
     console.error('❌ Error al revocar sesiones:', error.message);
     throw error;
@@ -112,14 +112,15 @@ export const revokeOtherSessions = async (userId, currentToken) => {
 // =========================================================
 export const cleanupExpiredSessions = async () => {
   try {
-    const [result] = await pool.query(
+    // ✅ POSTGRESQL: Usar INTERVAL en lugar de DATE_SUB
+    const result = await pool.query(
       `DELETE FROM sesiones_activas 
        WHERE fecha_expiracion < NOW() 
-       OR ultima_actividad < DATE_SUB(NOW(), INTERVAL 30 DAY)`
+       OR ultima_actividad < NOW() - INTERVAL '30 days'`
     );
 
-    console.log(`🧹 ${result.affectedRows} sesiones antiguas eliminadas`);
-    return result.affectedRows;
+    console.log(`🧹 ${result.rowCount} sesiones antiguas eliminadas`);
+    return result.rowCount;
   } catch (error) {
     console.error('❌ Error al limpiar sesiones:', error.message);
     return 0;

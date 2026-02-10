@@ -21,15 +21,15 @@ const isValidEmail = (email) => {
   return emailRegex.test(email) && email.length <= 255;
 };
 
-// Sanitizar código (solo dígitos)
+// ✅ SANITIZAR CÓDIGO - ACEPTA LETRAS, NÚMEROS Y GUIÓN
 const sanitizeCode = (codigo) => {
   if (!codigo || typeof codigo !== 'string') return '';
-  return codigo.trim().replace(/[^0-9]/g, '').substring(0, 6);
+  return codigo.trim().toUpperCase().substring(0, 9);
 };
 
-// Validar código de 6 dígitos
+// ✅ VALIDAR CÓDIGO - FORMATO XXXX-XXXX (alfanumérico con guión)
 const isValidCode = (codigo) => {
-  return /^\d{6}$/.test(codigo);
+  return /^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(codigo);
 };
 
 // =========================================================
@@ -93,7 +93,6 @@ export const configurarGmail2FA = async (req, res) => {
   try {
     let { correo } = req.body;
     
-    // ✅ VALIDAR CAMPO REQUERIDO
     if (!correo) {
       return res.status(400).json({ 
         success: false,
@@ -101,10 +100,8 @@ export const configurarGmail2FA = async (req, res) => {
       });
     }
 
-    // ✅ SANITIZAR CORREO
     correo = sanitizeEmail(correo);
 
-    // ✅ VALIDAR FORMATO
     if (!isValidEmail(correo)) {
       return res.status(400).json({ 
         success: false,
@@ -114,19 +111,17 @@ export const configurarGmail2FA = async (req, res) => {
 
     secureLog.info('Configurando Gmail-2FA', { email: maskEmail(correo) });
 
-    // 1️⃣ Generar código
     const code = generateCode();
     
-    // 2️⃣ Guardar en BD
     try {
-      const [result] = await pool.query(
-        `UPDATE Usuarios
-         SET ultimo_codigo_gmail = ?, expiracion_codigo_gmail = DATE_ADD(NOW(), INTERVAL 10 MINUTE)
-         WHERE correo = ?`,
+      const result = await pool.query(
+        `UPDATE usuarios
+         SET secret_2fa = $1
+         WHERE correo = $2`,
         [code, correo]
       );
       
-      if (result.affectedRows === 0) {
+      if (result.rowCount === 0) {
         secureLog.security('GMAIL_2FA_USUARIO_NO_ENCONTRADO', null, { email: maskEmail(correo) });
         return res.status(404).json({ 
           success: false, 
@@ -141,18 +136,16 @@ export const configurarGmail2FA = async (req, res) => {
       });
     }
 
-    // 3️⃣ Enviar email
     try {
       await sendGmail2FACode(correo, code);
       secureLog.info('Email 2FA enviado', { email: maskEmail(correo) });
     } catch (emailError) {
       secureLog.error('Error al enviar email', emailError);
       
-      // Limpiar código si falla el envío
       await pool.query(
-        `UPDATE Usuarios
-         SET ultimo_codigo_gmail = NULL, expiracion_codigo_gmail = NULL
-         WHERE correo = ?`,
+        `UPDATE usuarios
+         SET secret_2fa = NULL
+         WHERE correo = $1`,
         [correo]
       );
       
@@ -186,7 +179,6 @@ export const verificarGmail2FA = async (req, res) => {
   try {
     let { correo, codigo } = req.body;
     
-    // ✅ VALIDAR CAMPOS REQUERIDOS
     if (!correo || !codigo) {
       return res.status(400).json({ 
         success: false,
@@ -194,11 +186,9 @@ export const verificarGmail2FA = async (req, res) => {
       });
     }
 
-    // ✅ SANITIZAR ENTRADAS
     correo = sanitizeEmail(correo);
     codigo = sanitizeCode(codigo);
 
-    // ✅ VALIDAR FORMATOS
     if (!isValidEmail(correo)) {
       return res.status(400).json({ 
         success: false,
@@ -209,19 +199,19 @@ export const verificarGmail2FA = async (req, res) => {
     if (!isValidCode(codigo)) {
       return res.status(400).json({ 
         success: false,
-        message: "El código debe ser de 6 dígitos" 
+        message: "El código debe tener formato XXXX-XXXX" 
       });
     }
 
     secureLog.info('Verificando código Gmail-2FA', { email: maskEmail(correo) });
 
-    const [rows] = await pool.query(
-      `SELECT id_usuario FROM Usuarios
-       WHERE correo = ? AND ultimo_codigo_gmail = ? AND expiracion_codigo_gmail > NOW()`,
+    const result = await pool.query(
+      `SELECT id_usuario FROM usuarios
+       WHERE correo = $1 AND secret_2fa = $2`,
       [correo, codigo]
     );
 
-    if (!rows.length) {
+    if (result.rows.length === 0) {
       secureLog.security('GMAIL_2FA_CODIGO_INVALIDO', null, { email: maskEmail(correo) });
       return res.status(401).json({ 
         success: false,
@@ -229,12 +219,12 @@ export const verificarGmail2FA = async (req, res) => {
       });
     }
 
-    const userId = rows[0].id_usuario;
+    const userId = result.rows[0].id_usuario;
 
     await pool.query(
-      `UPDATE Usuarios
-       SET metodo_gmail_2fa = 1, ultimo_codigo_gmail = NULL, expiracion_codigo_gmail = NULL
-       WHERE correo = ?`,
+      `UPDATE usuarios
+       SET requiere_2fa = TRUE, secret_2fa = NULL
+       WHERE correo = $1`,
       [correo]
     );
 
@@ -261,7 +251,6 @@ export const enviarCodigoLoginGmail = async (req, res) => {
   try {
     let { correo } = req.body;
 
-    // ✅ VALIDAR CAMPO REQUERIDO
     if (!correo) {
       return res.status(400).json({ 
         success: false,
@@ -269,10 +258,8 @@ export const enviarCodigoLoginGmail = async (req, res) => {
       });
     }
 
-    // ✅ SANITIZAR CORREO
     correo = sanitizeEmail(correo);
 
-    // ✅ VALIDAR FORMATO
     if (!isValidEmail(correo)) {
       return res.status(400).json({ 
         success: false,
@@ -282,13 +269,12 @@ export const enviarCodigoLoginGmail = async (req, res) => {
 
     secureLog.info('Enviando código de login Gmail-2FA', { email: maskEmail(correo) });
 
-    // Verificar que el usuario existe y tiene Gmail-2FA activo
-    const [userCheck] = await pool.query(
-      `SELECT id_usuario FROM Usuarios WHERE correo = ? AND metodo_gmail_2fa = 1`,
+    const userCheck = await pool.query(
+      `SELECT id_usuario FROM usuarios WHERE correo = $1 AND requiere_2fa = TRUE`,
       [correo]
     );
 
-    if (!userCheck.length) {
+    if (userCheck.rows.length === 0) {
       secureLog.security('GMAIL_2FA_LOGIN_USUARIO_NO_ENCONTRADO', null, { email: maskEmail(correo) });
       return res.status(404).json({ 
         success: false,
@@ -299,9 +285,9 @@ export const enviarCodigoLoginGmail = async (req, res) => {
     const code = generateCode();
     
     await pool.query(
-      `UPDATE Usuarios
-       SET ultimo_codigo_gmail = ?, expiracion_codigo_gmail = DATE_ADD(NOW(), INTERVAL 10 MINUTE)
-       WHERE correo = ?`,
+      `UPDATE usuarios
+       SET secret_2fa = $1
+       WHERE correo = $2`,
       [code, correo]
     );
 
@@ -310,11 +296,10 @@ export const enviarCodigoLoginGmail = async (req, res) => {
     } catch (emailError) {
       secureLog.error('Error al enviar email de login', emailError);
       
-      // Limpiar código si falla
       await pool.query(
-        `UPDATE Usuarios
-         SET ultimo_codigo_gmail = NULL, expiracion_codigo_gmail = NULL
-         WHERE correo = ?`,
+        `UPDATE usuarios
+         SET secret_2fa = NULL
+         WHERE correo = $1`,
         [correo]
       );
       
@@ -324,7 +309,7 @@ export const enviarCodigoLoginGmail = async (req, res) => {
       });
     }
     
-    secureLog.security('GMAIL_2FA_LOGIN_CODIGO_ENVIADO', userCheck[0].id_usuario, { email: maskEmail(correo) });
+    secureLog.security('GMAIL_2FA_LOGIN_CODIGO_ENVIADO', userCheck.rows[0].id_usuario, { email: maskEmail(correo) });
     
     res.json({ 
       success: true, 
@@ -348,7 +333,6 @@ export const verificarCodigoLoginGmail = async (req, res) => {
   try {
     let { correo, codigo } = req.body;
 
-    // ✅ VALIDAR CAMPOS REQUERIDOS
     if (!correo || !codigo) {
       return res.status(400).json({ 
         success: false,
@@ -356,11 +340,9 @@ export const verificarCodigoLoginGmail = async (req, res) => {
       });
     }
 
-    // ✅ SANITIZAR ENTRADAS
     correo = sanitizeEmail(correo);
     codigo = sanitizeCode(codigo);
 
-    // ✅ VALIDAR FORMATOS
     if (!isValidEmail(correo)) {
       return res.status(400).json({ 
         success: false,
@@ -371,19 +353,19 @@ export const verificarCodigoLoginGmail = async (req, res) => {
     if (!isValidCode(codigo)) {
       return res.status(400).json({ 
         success: false,
-        message: "El código debe ser de 6 dígitos" 
+        message: "El código debe tener formato XXXX-XXXX" 
       });
     }
 
     secureLog.info('Verificando código de login Gmail-2FA', { email: maskEmail(correo) });
     
-    const [rows] = await pool.query(
-      `SELECT id_usuario, nombre, correo, estado FROM Usuarios
-       WHERE correo = ? AND ultimo_codigo_gmail = ? AND expiracion_codigo_gmail > NOW()`,
+    const result = await pool.query(
+      `SELECT id_usuario, nombre_completo, correo, estado FROM usuarios
+       WHERE correo = $1 AND secret_2fa = $2`,
       [correo, codigo]
     );
 
-    if (!rows.length) {
+    if (result.rows.length === 0) {
       secureLog.security('GMAIL_2FA_LOGIN_CODIGO_INVALIDO', null, { email: maskEmail(correo) });
       return res.status(401).json({ 
         success: false,
@@ -391,10 +373,9 @@ export const verificarCodigoLoginGmail = async (req, res) => {
       });
     }
 
-    const user = rows[0];
+    const user = result.rows[0];
 
-    // ✅ Verificar estado de la cuenta
-    if (user.estado !== 'Activo') {
+    if (user.estado !== 'activo') {
       secureLog.security('GMAIL_2FA_LOGIN_CUENTA_INACTIVA', user.id_usuario, { estado: user.estado });
       return res.status(403).json({ 
         success: false,
@@ -402,15 +383,13 @@ export const verificarCodigoLoginGmail = async (req, res) => {
       });
     }
 
-    // ✅ Limpiar código usado
     await pool.query(
-      `UPDATE Usuarios
-       SET ultimo_codigo_gmail = NULL, expiracion_codigo_gmail = NULL
-       WHERE id_usuario = ?`,
+      `UPDATE usuarios
+       SET secret_2fa = NULL
+       WHERE id_usuario = $1`,
       [user.id_usuario]
     );
 
-    // ✅ Generar token JWT
     const jwt = (await import("jsonwebtoken")).default;
     const crypto = (await import("crypto")).default;
     
@@ -428,13 +407,11 @@ export const verificarCodigoLoginGmail = async (req, res) => {
       }
     );
 
-    // ✅ Guardar sesión activa
     try {
       const { saveActiveSession } = await import('../services/sessionService.js');
       await saveActiveSession(user.id_usuario, token, req);
     } catch (sessionError) {
       secureLog.error('Error al guardar sesión', sessionError);
-      // No fallar el login por esto
     }
 
     secureLog.security('GMAIL_2FA_LOGIN_EXITOSO', user.id_usuario, { email: maskEmail(correo) });
@@ -446,7 +423,7 @@ export const verificarCodigoLoginGmail = async (req, res) => {
       token_type: "bearer",
       usuario: {
         id: user.id_usuario,
-        nombre: user.nombre,
+        nombre: user.nombre_completo,
         correo: user.correo
       }
     });
@@ -476,14 +453,14 @@ export const desactivarGmail2FA = async (req, res) => {
 
     secureLog.info('Desactivando Gmail-2FA', { userId });
 
-    const [result] = await pool.query(
-      `UPDATE Usuarios
-       SET metodo_gmail_2fa = 0, ultimo_codigo_gmail = NULL, expiracion_codigo_gmail = NULL
-       WHERE id_usuario = ?`,
+    const result = await pool.query(
+      `UPDATE usuarios
+       SET requiere_2fa = FALSE, secret_2fa = NULL
+       WHERE id_usuario = $1`,
       [userId]
     );
 
-    if (result.affectedRows === 0) {
+    if (result.rowCount === 0) {
       return res.status(404).json({ 
         success: false,
         message: "Usuario no encontrado" 
@@ -520,12 +497,12 @@ export const estadoGmail2FA = async (req, res) => {
       });
     }
 
-    const [rows] = await pool.query(
-      `SELECT metodo_gmail_2fa FROM Usuarios WHERE id_usuario = ?`,
+    const result = await pool.query(
+      `SELECT requiere_2fa FROM usuarios WHERE id_usuario = $1`,
       [userId]
     );
 
-    if (!rows.length) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ 
         success: false,
         message: "Usuario no encontrado" 
@@ -534,7 +511,7 @@ export const estadoGmail2FA = async (req, res) => {
 
     res.json({ 
       success: true,
-      gmail2faActivo: rows[0].metodo_gmail_2fa === 1
+      gmail2faActivo: result.rows[0].requiere_2fa === true
     });
 
   } catch (error) {

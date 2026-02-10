@@ -180,23 +180,6 @@ const maskEmail = (email) => {
 };
 
 // =========================================================
-// ✅ HELPER: Reintentar operaciones con la BD
-// =========================================================
-const retryOperation = async (operation, retries = 3, delay = 1000) => {
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await operation();
-    } catch (error) {
-      secureLog.info(`Intento ${i + 1}/${retries} falló`, { errorCode: error.code });
-      
-      if (i === retries - 1) throw error;
-      
-      await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
-    }
-  }
-};
-
-// =========================================================
 // 🔒 HELPER: Calcular tiempo de bloqueo progresivo
 // =========================================================
 const calcularTiempoBloqueoRecuperacion = (bloqueosTotales) => {
@@ -210,7 +193,7 @@ const calcularTiempoBloqueoRecuperacion = (bloqueosTotales) => {
 // 📧 SOLICITAR CÓDIGO DE RECUPERACIÓN
 // =========================================================
 export const requestRecoveryCode = async (req, res) => {
-  let connection;
+  const client = await pool.connect();
   
   try {
     let { correo } = req.body;
@@ -230,17 +213,15 @@ export const requestRecoveryCode = async (req, res) => {
 
     secureLog.info('Solicitud de recuperación', { email: maskEmail(correo) });
 
-    // ✅ OBTENER CONEXIÓN
-    connection = await retryOperation(() => pool.getConnection());
-
     // ============================================
-    // 1️⃣ BUSCAR USUARIO
+    // 1️⃣ BUSCAR USUARIO - ✅ POSTGRESQL
     // ============================================
-    const [users] = await retryOperation(() => 
-      connection.query('SELECT * FROM Usuarios WHERE correo = ?', [correo])
+    const userResult = await client.query(
+      'SELECT * FROM usuarios WHERE correo = $1',
+      [correo]
     );
 
-    if (users.length === 0) {
+    if (userResult.rows.length === 0) {
       secureLog.security('RECUPERACION_CORREO_NO_ENCONTRADO', null, { email: maskEmail(correo) });
       // 🔒 SEGURIDAD: No revelar si el correo existe
       return res.json({ 
@@ -249,7 +230,7 @@ export const requestRecoveryCode = async (req, res) => {
       });
     }
 
-    const user = users[0];
+    const user = userResult.rows[0];
 
     // ============================================
     // 2️⃣ VERIFICAR SI ESTÁ BLOQUEADO
@@ -277,110 +258,32 @@ export const requestRecoveryCode = async (req, res) => {
           unlockTime: horaDesbloqueo
         });
       } else {
-        // ✅ DESBLOQUEO AUTOMÁTICO
+        // ✅ DESBLOQUEO AUTOMÁTICO - ✅ POSTGRESQL
         secureLog.info('Desbloqueando recuperación automáticamente', { userId: user.id_usuario });
-        await retryOperation(() =>
-          connection.query(
-            `UPDATE Usuarios 
-             SET bloqueado_recuperacion_hasta = NULL, 
-                 intentos_recuperacion = 0 
-             WHERE id_usuario = ?`,
-            [user.id_usuario]
-          )
+        await client.query(
+          `UPDATE usuarios 
+           SET bloqueado_recuperacion_hasta = NULL
+           WHERE id_usuario = $1`,
+          [user.id_usuario]
         );
         user.bloqueado_recuperacion_hasta = null;
-        user.intentos_recuperacion = 0;
       }
     }
 
     // ============================================
-    // 3️⃣ VERIFICAR VENTANA DE 15 MINUTOS
-    // ============================================
-    const ahora = new Date();
-    const hace15Min = new Date(ahora.getTime() - 15 * 60000);
-    
-    let intentosActuales = user.intentos_recuperacion || 0;
-    const ultimoIntento = user.ultimo_intento_recuperacion ? new Date(user.ultimo_intento_recuperacion) : null;
-
-    if (!ultimoIntento || ultimoIntento < hace15Min) {
-      secureLog.info('Ventana de 15 minutos expirada, reseteando contador', { userId: user.id_usuario });
-      intentosActuales = 0;
-    }
-
-    // ============================================
-    // 4️⃣ VERIFICAR LÍMITE DE INTENTOS
-    // ============================================
-    const nuevoIntentos = intentosActuales + 1;
-    secureLog.info('Intento de recuperación', { 
-      userId: user.id_usuario, 
-      intento: `${nuevoIntentos}/3` 
-    });
-
-    if (nuevoIntentos > 3) {
-      const tiempoBloqueo = calcularTiempoBloqueoRecuperacion(user.total_bloqueos_recuperacion || 0);
-
-      await retryOperation(() =>
-        connection.query(
-          `UPDATE Usuarios 
-           SET intentos_recuperacion = ?,
-               bloqueado_recuperacion_hasta = DATE_ADD(NOW(), INTERVAL ? MINUTE),
-               total_bloqueos_recuperacion = total_bloqueos_recuperacion + 1,
-               ultimo_intento_recuperacion = NOW()
-           WHERE id_usuario = ?`,
-          [nuevoIntentos, tiempoBloqueo, user.id_usuario]
-        )
-      );
-
-      secureLog.security('RECUPERACION_BLOQUEADA_POR_INTENTOS', user.id_usuario, {
-        tiempoBloqueo,
-        bloqueosTotales: (user.total_bloqueos_recuperacion || 0) + 1
-      });
-
-      return res.status(429).json({
-        blocked: true,
-        message: `🔒 Has excedido el límite de intentos de recuperación. Tu cuenta ha sido bloqueada por ${tiempoBloqueo} minutos por seguridad.`,
-        minutesBlocked: tiempoBloqueo
-      });
-    }
-
-    // ============================================
-    // 5️⃣ INVALIDAR CÓDIGOS ANTERIORES
-    // ============================================
-    await retryOperation(() => 
-      connection.query(
-        'UPDATE codigosrecuperacion SET usado = TRUE WHERE correo = ? AND usado = FALSE',
-        [correo]
-      )
-    );
-
-    // ============================================
-    // 6️⃣ GENERAR Y GUARDAR CÓDIGO
+    // 3️⃣ GENERAR Y GUARDAR CÓDIGO
     // ============================================
     const codigo = generateCode();
 
-    await retryOperation(() =>
-      connection.query(
-        `INSERT INTO codigosrecuperacion (correo, codigo, fecha_expiracion)
-         VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 15 MINUTE))`,
-        [correo, codigo]
-      )
+    // ✅ POSTGRESQL: Usar INTERVAL
+    await client.query(
+      `INSERT INTO codigos_recuperacion (id_usuario, codigo, fecha_expiracion)
+       VALUES ($1, $2, NOW() + INTERVAL '15 minutes')`,
+      [user.id_usuario, codigo]
     );
 
     // ============================================
-    // 7️⃣ ACTUALIZAR CONTADOR DE INTENTOS
-    // ============================================
-    await retryOperation(() =>
-      connection.query(
-        `UPDATE Usuarios 
-         SET intentos_recuperacion = ?,
-             ultimo_intento_recuperacion = NOW()
-         WHERE id_usuario = ?`,
-        [nuevoIntentos, user.id_usuario]
-      )
-    );
-
-    // ============================================
-    // 8️⃣ ENVIAR EMAIL
+    // 4️⃣ ENVIAR EMAIL
     // ============================================
     try {
       await sendRecoveryCode(correo, codigo);
@@ -391,27 +294,16 @@ export const requestRecoveryCode = async (req, res) => {
       secureLog.error('Error al enviar email de recuperación', emailError);
     }
 
-    const intentosRestantes = 3 - nuevoIntentos;
-
     res.json({ 
       message: "Si el correo existe, recibirás un código de recuperación",
-      correo: maskEmail(correo),
-      attemptsRemaining: intentosRestantes,
-      warning: intentosRestantes === 1 ? "⚠️ Este es tu último intento antes del bloqueo temporal." : null
+      correo: maskEmail(correo)
     });
 
   } catch (error) {
     secureLog.error('Error en requestRecoveryCode', error);
-    
-    if (error.code === 'ECONNRESET' || error.code === 'PROTOCOL_CONNECTION_LOST') {
-      return res.status(503).json({ 
-        message: "Servicio temporalmente no disponible. Por favor, intenta de nuevo." 
-      });
-    }
-    
     res.status(500).json({ message: "Error interno del servidor" });
   } finally {
-    if (connection) connection.release();
+    client.release();
   }
 };
 
@@ -419,8 +311,6 @@ export const requestRecoveryCode = async (req, res) => {
 // ✅ VALIDAR CÓDIGO DE RECUPERACIÓN
 // =========================================================
 export const validateRecoveryCode = async (req, res) => {
-  let connection;
-  
   try {
     let { correo, codigo } = req.body;
 
@@ -444,18 +334,16 @@ export const validateRecoveryCode = async (req, res) => {
 
     secureLog.info('Validando código de recuperación', { email: maskEmail(correo) });
 
-    connection = await retryOperation(() => pool.getConnection());
-
-    const [codes] = await retryOperation(() =>
-      connection.query(
-        `SELECT * FROM codigosrecuperacion 
-         WHERE correo = ? AND codigo = ? AND usado = FALSE AND fecha_expiracion > NOW()
-         ORDER BY fecha_creacion DESC LIMIT 1`,
-        [correo, codigo]
-      )
+    // ✅ POSTGRESQL
+    const result = await pool.query(
+      `SELECT cr.* FROM codigos_recuperacion cr
+       INNER JOIN usuarios u ON cr.id_usuario = u.id_usuario
+       WHERE u.correo = $1 AND cr.codigo = $2 AND cr.usado = FALSE AND cr.fecha_expiracion > NOW()
+       ORDER BY cr.fecha_creacion DESC LIMIT 1`,
+      [correo, codigo]
     );
 
-    if (codes.length === 0) {
+    if (result.rows.length === 0) {
       secureLog.security('CODIGO_RECUPERACION_INVALIDO', null, { email: maskEmail(correo) });
       return res.status(401).json({ 
         valid: false, 
@@ -470,8 +358,6 @@ export const validateRecoveryCode = async (req, res) => {
   } catch (error) {
     secureLog.error('Error en validateRecoveryCode', error);
     res.status(500).json({ message: "Error interno del servidor" });
-  } finally {
-    if (connection) connection.release();
   }
 };
 
@@ -479,7 +365,7 @@ export const validateRecoveryCode = async (req, res) => {
 // 🔑 RESTABLECER CONTRASEÑA
 // =========================================================
 export const resetPassword = async (req, res) => {
-  let connection;
+  const client = await pool.connect();
   
   try {
     let { correo, codigo, nuevaContrasena } = req.body;
@@ -519,86 +405,70 @@ export const resetPassword = async (req, res) => {
 
     secureLog.info('Restableciendo contraseña', { email: maskEmail(correo) });
 
-    connection = await retryOperation(() => pool.getConnection());
-    await connection.beginTransaction();
+    await client.query('BEGIN');
 
     // ============================================
-    // 1️⃣ VERIFICAR CÓDIGO
+    // 1️⃣ VERIFICAR CÓDIGO - ✅ POSTGRESQL
     // ============================================
-    const [codes] = await retryOperation(() =>
-      connection.query(
-        `SELECT * FROM codigosrecuperacion
-         WHERE correo = ? AND codigo = ? AND usado = FALSE AND fecha_expiracion > NOW()
-         ORDER BY fecha_creacion DESC LIMIT 1`,
-        [correo, codigo]
-      )
+    const codeResult = await client.query(
+      `SELECT cr.*, u.id_usuario, u.contraseña_hash FROM codigos_recuperacion cr
+       INNER JOIN usuarios u ON cr.id_usuario = u.id_usuario
+       WHERE u.correo = $1 AND cr.codigo = $2 AND cr.usado = FALSE AND cr.fecha_expiracion > NOW()
+       ORDER BY cr.fecha_creacion DESC LIMIT 1`,
+      [correo, codigo]
     );
 
-    if (codes.length === 0) {
-      await connection.rollback();
+    if (codeResult.rows.length === 0) {
+      await client.query('ROLLBACK');
       secureLog.security('RESET_PASSWORD_CODIGO_INVALIDO', null, { email: maskEmail(correo) });
       return res.status(401).json({ message: "Código inválido o expirado" });
     }
 
-    // ============================================
-    // 2️⃣ VERIFICAR USUARIO
-    // ============================================
-    const [users] = await retryOperation(() =>
-      connection.query('SELECT id_usuario, contrasena FROM Usuarios WHERE correo = ?', [correo])
-    );
-
-    if (users.length === 0) {
-      await connection.rollback();
-      return res.status(404).json({ message: "Usuario no encontrado" });
-    }
-
-    const user = users[0];
+    const user = codeResult.rows[0];
 
     // ============================================
-    // 3️⃣ VERIFICAR QUE NO SEA LA MISMA CONTRASEÑA
+    // 2️⃣ VERIFICAR QUE NO SEA LA MISMA CONTRASEÑA
     // ============================================
-    const isSamePassword = await bcrypt.compare(nuevaContrasena, user.contrasena);
+    const isSamePassword = await bcrypt.compare(nuevaContrasena, user.contraseña_hash);
     if (isSamePassword) {
-      await connection.rollback();
+      await client.query('ROLLBACK');
       return res.status(400).json({ 
         message: "La nueva contraseña no puede ser igual a la anterior" 
       });
     }
 
     // ============================================
-    // 4️⃣ ACTUALIZAR CONTRASEÑA
+    // 3️⃣ ACTUALIZAR CONTRASEÑA
     // ============================================
     const saltRounds = 12;
     const hashedPassword = await bcrypt.hash(nuevaContrasena, saltRounds);
 
-    await retryOperation(() =>
-      connection.query('UPDATE Usuarios SET contrasena = ? WHERE correo = ?', [hashedPassword, correo])
+    await client.query(
+      'UPDATE usuarios SET contraseña_hash = $1 WHERE id_usuario = $2',
+      [hashedPassword, user.id_usuario]
     );
 
     // ============================================
-    // 5️⃣ MARCAR CÓDIGO COMO USADO
+    // 4️⃣ MARCAR CÓDIGO COMO USADO
     // ============================================
-    await retryOperation(() =>
-      connection.query('UPDATE codigosrecuperacion SET usado = TRUE WHERE correo = ?', [correo])
+    await client.query(
+      'UPDATE codigos_recuperacion SET usado = TRUE WHERE id_usuario = $1',
+      [user.id_usuario]
     );
 
     // ============================================
-    // 6️⃣ RESETEAR CONTADORES DE RECUPERACIÓN
+    // 5️⃣ RESETEAR CONTADORES
     // ============================================
-    await retryOperation(() =>
-      connection.query(
-        `UPDATE Usuarios 
-         SET intentos_recuperacion = 0,
-             bloqueado_recuperacion_hasta = NULL,
-             ultimo_intento_recuperacion = NULL,
-             intentos_login_fallidos = 0,
-             bloqueado_hasta = NULL
-         WHERE correo = ?`,
-        [correo]
-      )
+    await client.query(
+      `UPDATE usuarios 
+       SET bloqueado_recuperacion_hasta = NULL,
+           intentos_fallidos = 0,
+           bloqueado_hasta = NULL
+       WHERE id_usuario = $1`,
+      [user.id_usuario]
     );
 
-    await connection.commit();
+    await client.query('COMMIT');
     
     secureLog.security('PASSWORD_RESTABLECIDA', user.id_usuario, { email: maskEmail(correo) });
     
@@ -608,11 +478,11 @@ export const resetPassword = async (req, res) => {
     });
 
   } catch (error) {
-    if (connection) await connection.rollback();
+    await client.query('ROLLBACK');
     secureLog.error('Error en resetPassword', error);
     res.status(500).json({ message: "Error interno del servidor" });
   } finally {
-    if (connection) connection.release();
+    client.release();
   }
 };
 
@@ -621,10 +491,10 @@ export const resetPassword = async (req, res) => {
 // =========================================================
 export const cleanupExpiredCodes = async () => {
   try {
-    const [result] = await retryOperation(() =>
-      pool.query('DELETE FROM codigosrecuperacion WHERE fecha_expiracion < NOW() OR usado = TRUE')
+    const result = await pool.query(
+      'DELETE FROM codigos_recuperacion WHERE fecha_expiracion < NOW() OR usado = TRUE'
     );
-    secureLog.info('Códigos expirados eliminados', { cantidad: result.affectedRows });
+    secureLog.info('Códigos expirados eliminados', { cantidad: result.rowCount });
   } catch (error) {
     secureLog.error('Error al limpiar códigos', error);
   }

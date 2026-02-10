@@ -30,13 +30,14 @@ export const listarCategorias = async (req, res) => {
         c.icono,
         COUNT(o.id_obra) AS total_obras
       FROM categorias c
-      LEFT JOIN obras o ON c.id_categoria = o.id_categoria AND o.activa = 1
-      WHERE c.activa = 1
+      LEFT JOIN obras o ON c.id_categoria = o.id_categoria AND o.activa = TRUE
+      WHERE c.activa = TRUE
       GROUP BY c.id_categoria
       ORDER BY c.nombre ASC
     `;
 
-    const [categorias] = await pool.query(query);
+    const result = await pool.query(query);
+    const categorias = result.rows;
 
     secureLog.info('Categorías listadas', { total: categorias.length });
 
@@ -67,22 +68,22 @@ export const obtenerCategoriaPorId = async (req, res) => {
         c.*,
         COUNT(o.id_obra) AS total_obras
       FROM categorias c
-      LEFT JOIN obras o ON c.id_categoria = o.id_categoria AND o.activa = 1
-      WHERE c.id_categoria = ? AND c.activa = 1
+      LEFT JOIN obras o ON c.id_categoria = o.id_categoria AND o.activa = TRUE
+      WHERE c.id_categoria = $1 AND c.activa = TRUE
       GROUP BY c.id_categoria
       LIMIT 1
     `;
 
-    const [categorias] = await pool.query(queryCat, [id]);
+    const resultCat = await pool.query(queryCat, [id]);
 
-    if (categorias.length === 0) {
+    if (resultCat.rows.length === 0) {
       return res.status(404).json({ 
         success: false,
         message: "Categoría no encontrada" 
       });
     }
 
-    const categoria = categorias[0];
+    const categoria = resultCat.rows[0];
 
     // 2️⃣ OBRAS DE ESTA CATEGORÍA (primeras 12)
     const queryObras = `
@@ -95,14 +96,15 @@ export const obtenerCategoriaPorId = async (req, res) => {
         MIN(ot.precio_base) AS precio_minimo
       FROM obras o
       INNER JOIN artistas a ON o.id_artista = a.id_artista
-      LEFT JOIN obras_tamaños ot ON o.id_obra = ot.id_obra AND ot.activo = 1
-      WHERE o.id_categoria = ? AND o.activa = 1
-      GROUP BY o.id_obra
+      LEFT JOIN obras_tamaños ot ON o.id_obra = ot.id_obra AND ot.activo = TRUE
+      WHERE o.id_categoria = $1 AND o.activa = TRUE
+      GROUP BY o.id_obra, a.nombre_artistico
       ORDER BY o.fecha_creacion DESC
       LIMIT 12
     `;
 
-    const [obras] = await pool.query(queryObras, [id]);
+    const resultObras = await pool.query(queryObras, [id]);
+    const obras = resultObras.rows;
 
     res.json({
       success: true,
@@ -128,19 +130,19 @@ export const obtenerCategoriaPorSlug = async (req, res) => {
   try {
     const { slug } = req.params;
 
-    const [categorias] = await pool.query(
-      'SELECT id_categoria FROM categorias WHERE slug = ? AND activa = 1 LIMIT 1',
+    const result = await pool.query(
+      'SELECT id_categoria FROM categorias WHERE slug = $1 AND activa = TRUE LIMIT 1',
       [slug]
     );
 
-    if (categorias.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ 
         success: false,
         message: "Categoría no encontrada" 
       });
     }
 
-    req.params.id = categorias[0].id_categoria;
+    req.params.id = result.rows[0].id_categoria;
     return obtenerCategoriaPorId(req, res);
 
   } catch (error) {

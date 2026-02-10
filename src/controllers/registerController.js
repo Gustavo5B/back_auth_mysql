@@ -250,13 +250,13 @@ export const register = async (req, res) => {
       });
     }
 
-    // 5️⃣ VERIFICAR SI EL CORREO YA EXISTE
-    const [existingUser] = await pool.query(
-      "SELECT id_usuario FROM Usuarios WHERE correo = ? LIMIT 1",
+    // 5️⃣ VERIFICAR SI EL CORREO YA EXISTE - ✅ POSTGRESQL
+    const existingUser = await pool.query(
+      "SELECT id_usuario FROM usuarios WHERE correo = $1 LIMIT 1",
       [correo]
     );
 
-    if (existingUser.length > 0) {
+    if (existingUser.rows.length > 0) {
       secureLog.security('REGISTRO_DUPLICADO', null, { correo });
       return res.status(400).json({ 
         message: "El correo ya está registrado." 
@@ -269,51 +269,54 @@ export const register = async (req, res) => {
 
     // 7️⃣ GENERAR CÓDIGO DE VERIFICACIÓN
     const codigoVerificacion = generateVerificationCode();
-    const expiracion = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
     // 📍 OBTENER IP Y FECHA/HORA
     const ipUsuario = getClientIP(req);
     const fechaAceptacion = getMexicoDateTime();
 
-    // 8️⃣ INSERTAR USUARIO
+    // 8️⃣ INSERTAR USUARIO - ✅ POSTGRESQL con RETURNING
     const insertQuery = `
-      INSERT INTO Usuarios 
-      (nombre, correo, contrasena, estado, codigo_verificacion, expiracion_codigo_verificacion,
-       acepto_terminos, fecha_aceptacion_terminos, version_terminos_aceptada, ip_aceptacion) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO usuarios 
+      (nombre_completo, correo, contraseña_hash, estado, rol)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id_usuario
     `;
     
-    const [result] = await pool.query(insertQuery, [
+    const result = await pool.query(insertQuery, [
       nombre,
       correo,
       hash,
-      "Pendiente",
-      codigoVerificacion,
-      expiracion,
-      true,
-      fechaAceptacion,
-      '1.0',
-      ipUsuario
+      "pendiente",
+      "usuario"
     ]);
 
-    secureLog.security('REGISTRO_EXITOSO', result.insertId, { 
+    const userId = result.rows[0].id_usuario;
+
+    // 9️⃣ GUARDAR CÓDIGO DE VERIFICACIÓN EN TABLA SEPARADA
+    await pool.query(
+      `INSERT INTO codigos_2fa_email (id_usuario, codigo, fecha_expiracion)
+       VALUES ($1, $2, NOW() + INTERVAL '24 hours')`,
+      [userId, codigoVerificacion]
+    );
+
+    secureLog.security('REGISTRO_EXITOSO', userId, { 
       correo,
       terminosAceptados: true 
     });
 
-    // 9️⃣ ENVIAR EMAIL DE VERIFICACIÓN
+    // 🔟 ENVIAR EMAIL DE VERIFICACIÓN
     try {
       await sendVerificationEmail(correo, nombre, codigoVerificacion);
       secureLog.info('Código de verificación enviado', { 
-        userId: result.insertId 
+        userId 
       });
     } catch (emailError) {
       secureLog.error('Error al enviar email de verificación', emailError);
       
       // Si falla el email, eliminar el usuario creado
       await pool.query(
-        "DELETE FROM Usuarios WHERE id_usuario = ?",
-        [result.insertId]
+        "DELETE FROM usuarios WHERE id_usuario = $1",
+        [userId]
       );
       
       return res.status(500).json({ 
@@ -326,7 +329,7 @@ export const register = async (req, res) => {
       message: "Registro exitoso. Revisa tu correo para verificar tu cuenta 📧",
       requiresVerification: true,
       user: {
-        id: result.insertId,
+        id: userId,
         nombre,
         correo,
         terminos_aceptados: true,
@@ -338,7 +341,8 @@ export const register = async (req, res) => {
   } catch (error) {
     secureLog.error('Error en registro', error);
     
-    if (error.code === 'ER_DUP_ENTRY') {
+    // ✅ POSTGRESQL: código de error para duplicado
+    if (error.code === '23505') {
       return res.status(400).json({ 
         message: "El correo ya está registrado." 
       });
@@ -375,24 +379,27 @@ export const verifyEmail = async (req, res) => {
       });
     }
 
+    // ✅ POSTGRESQL
     const selectQuery = `
-      SELECT id_usuario, nombre, codigo_verificacion, expiracion_codigo_verificacion 
-      FROM Usuarios 
-      WHERE correo = ? AND estado = ? 
+      SELECT u.id_usuario, u.nombre_completo, c2fa.codigo, c2fa.fecha_expiracion
+      FROM usuarios u
+      INNER JOIN codigos_2fa_email c2fa ON u.id_usuario = c2fa.id_usuario
+      WHERE u.correo = $1 AND u.estado = $2 AND c2fa.usado = FALSE
+      ORDER BY c2fa.fecha_creacion DESC
       LIMIT 1
     `;
     
-    const [rows] = await pool.query(selectQuery, [correo, 'Pendiente']);
+    const result = await pool.query(selectQuery, [correo, 'pendiente']);
 
-    if (rows.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ 
         message: "Usuario no encontrado o ya verificado" 
       });
     }
 
-    const user = rows[0];
+    const user = result.rows[0];
 
-    if (user.codigo_verificacion !== codigo) {
+    if (user.codigo !== codigo) {
       secureLog.security('CODIGO_VERIFICACION_INCORRECTO', user.id_usuario);
       return res.status(401).json({ 
         message: "Código de verificación incorrecto" 
@@ -400,7 +407,7 @@ export const verifyEmail = async (req, res) => {
     }
 
     const now = new Date();
-    const expiracion = new Date(user.expiracion_codigo_verificacion);
+    const expiracion = new Date(user.fecha_expiracion);
     
     if (now > expiracion) {
       secureLog.security('CODIGO_VERIFICACION_EXPIRADO', user.id_usuario);
@@ -409,20 +416,25 @@ export const verifyEmail = async (req, res) => {
       });
     }
 
-    const updateQuery = `
-      UPDATE Usuarios 
-      SET estado = ?, 
-          codigo_verificacion = NULL, 
-          expiracion_codigo_verificacion = NULL 
-      WHERE id_usuario = ?
-    `;
-    
-    await pool.query(updateQuery, ['Activo', user.id_usuario]);
+    // ✅ ACTUALIZAR USUARIO Y MARCAR CÓDIGO COMO USADO
+    await pool.query(
+      `UPDATE usuarios 
+       SET estado = $1
+       WHERE id_usuario = $2`,
+      ['activo', user.id_usuario]
+    );
+
+    await pool.query(
+      `UPDATE codigos_2fa_email
+       SET usado = TRUE
+       WHERE id_usuario = $1`,
+      [user.id_usuario]
+    );
 
     secureLog.security('CUENTA_VERIFICADA', user.id_usuario);
 
     const { sendWelcomeEmail } = await import('../services/emailService.js');
-    sendWelcomeEmail(correo, user.nombre)
+    sendWelcomeEmail(correo, user.nombre_completo)
       .then(() => secureLog.info('Email de bienvenida enviado', { userId: user.id_usuario }))
       .catch((err) => secureLog.error('Error enviando email de bienvenida', err));
 
@@ -456,41 +468,40 @@ export const resendVerificationCode = async (req, res) => {
 
     correo = sanitizeEmail(correo);
 
+    // ✅ POSTGRESQL
     const selectQuery = `
-      SELECT id_usuario, nombre 
-      FROM Usuarios 
-      WHERE correo = ? AND estado = ? 
+      SELECT id_usuario, nombre_completo
+      FROM usuarios 
+      WHERE correo = $1 AND estado = $2
       LIMIT 1
     `;
     
-    const [rows] = await pool.query(selectQuery, [correo, 'Pendiente']);
+    const result = await pool.query(selectQuery, [correo, 'pendiente']);
 
-    if (rows.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ 
         message: "Usuario no encontrado o ya verificado" 
       });
     }
 
-    const user = rows[0];
+    const user = result.rows[0];
 
     const nuevoCodigoVerificacion = generateVerificationCode();
-    const nuevaExpiracion = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-    const updateQuery = `
-      UPDATE Usuarios 
-      SET codigo_verificacion = ?, 
-          expiracion_codigo_verificacion = ? 
-      WHERE id_usuario = ?
-    `;
-    
-    await pool.query(updateQuery, [
-      nuevoCodigoVerificacion,
-      nuevaExpiracion,
-      user.id_usuario
-    ]);
+    // ✅ INVALIDAR CÓDIGOS ANTERIORES Y CREAR UNO NUEVO
+    await pool.query(
+      `UPDATE codigos_2fa_email SET usado = TRUE WHERE id_usuario = $1`,
+      [user.id_usuario]
+    );
+
+    await pool.query(
+      `INSERT INTO codigos_2fa_email (id_usuario, codigo, fecha_expiracion)
+       VALUES ($1, $2, NOW() + INTERVAL '24 hours')`,
+      [user.id_usuario, nuevoCodigoVerificacion]
+    );
 
     const { sendVerificationEmail } = await import('../services/emailService.js');
-    await sendVerificationEmail(correo, user.nombre, nuevoCodigoVerificacion);
+    await sendVerificationEmail(correo, user.nombre_completo, nuevoCodigoVerificacion);
 
     secureLog.security('CODIGO_REENVIADO', user.id_usuario);
 

@@ -5,24 +5,19 @@ import express from 'express';
 import cors from 'cors';
 import cron from 'node-cron';
 import dotenv from 'dotenv';
-import helmet from 'helmet'; // ✅ AGREGAR (instalar: npm install helmet)
+import helmet from 'helmet';
 import authRoutes from './routes/authRoutes.js';
 import recoveryRoutes from './routes/recoveryRoutes.js';
 import twoFactorRoutes from './routes/twoFactorRoutes.js';
 import gmail2faRoutes from "./routes/gmail2faRoutes.js";
 import obrasRoutes from './routes/obrasRoutes.js';
-
-// Después de las rutas de obras:
 import categoriasRoutes from './routes/categoriasRoutes.js';
 import artistasRoutes from './routes/Artistasroutes.js';
 import etiquetasRoutes from './routes/etiquetasRoutes.js';
 import imagenesRoutes from './routes/imagenesRoutes.js';
-
 import { testConnection } from './config/db.js';
 import { cleanupExpiredCodes, sendRecoveryCode, generateCode } from './services/emailService.js';
 import { cleanupExpiredSessions } from './services/sessionService.js';
-
-// ✅ IMPORTAR MIDDLEWARES DE SEGURIDAD
 import { sanitizeInput } from './middlewares/sanitize.middleware.js';
 import { preventSQLInjection } from './middlewares/sql-injection.middleware.js';
 
@@ -36,7 +31,7 @@ const app = express();
 // 🛡️ HELMET - HEADERS DE SEGURIDAD
 // =========================================================
 app.use(helmet({
-  contentSecurityPolicy: false, // Desactivar para evitar conflictos
+  contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false
 }));
 
@@ -44,8 +39,8 @@ app.use(helmet({
 // 🌐 CONFIGURACIÓN DE CORS
 // =========================================================
 const allowedOrigins = [
-  'https://front-auth-eight.vercel.app', // Producción
-  'http://localhost:4200',             // Local
+  'https://front-auth-eight.vercel.app',
+  'http://localhost:4200',
 ];
 
 app.use(cors({
@@ -66,11 +61,9 @@ app.use(cors({
 // =========================================================
 // 🧩 MIDDLEWARES
 // =========================================================
-app.use(express.json({ limit: '10mb' })); // Limitar tamaño de payload
-
-// ✅ APLICAR MIDDLEWARES DE SEGURIDAD (EN ESTE ORDEN)
-app.use(sanitizeInput);           // 1️⃣ Protección XSS
-app.use(preventSQLInjection);     // 2️⃣ Protección SQL Injection
+app.use(express.json({ limit: '10mb' }));
+app.use(sanitizeInput);
+app.use(preventSQLInjection);
 
 // =========================================================
 // 🚀 RUTAS PRINCIPALES
@@ -81,16 +74,10 @@ app.use('/api/2fa', twoFactorRoutes);
 app.use("/api/gmail-2fa", gmail2faRoutes);
 app.use('/api/gmail2fa', gmail2faRoutes);
 app.use('/api/imagenes', imagenesRoutes);
-
-// =========================================================
-// 🚀 RUTAS OBRAS
-// =========================================================
-
 app.use('/api/obras', obrasRoutes);
 app.use('/api/categorias', categoriasRoutes);
 app.use('/api/artistas', artistasRoutes);
 app.use('/api/etiquetas', etiquetasRoutes);
-
 
 // =========================================================
 // 🧪 RUTA DE PRUEBA DEL SERVIDOR
@@ -98,6 +85,7 @@ app.use('/api/etiquetas', etiquetasRoutes);
 app.get('/', (req, res) => {
   res.json({
     message: '✅ Backend AUTH activo y corriendo correctamente.',
+    database: 'PostgreSQL', // ✅ CAMBIADO
     cors: allowedOrigins,
     security: {
       xss: 'enabled',
@@ -172,8 +160,8 @@ app.listen(PORT, async () => {
 
   try {
     await testConnection();
-    console.log('🟢 Conexión MySQL verificada correctamente.');
+    console.log('🟢 Conexión PostgreSQL verificada correctamente.'); // ✅ CAMBIADO
   } catch (error) {
-    console.error('❌ Error en la conexión MySQL:', error.message);
+    console.error('❌ Error en la conexión PostgreSQL:', error.message); // ✅ CAMBIADO
   }
 });

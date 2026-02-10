@@ -35,26 +35,27 @@ export const subirImagenPrincipal = async (req, res) => {
     const imageUrl = req.file.path;
     const publicId = req.file.public_id;
 
+    // ✅ POSTGRESQL
     // Actualizar obra con nueva imagen
     await pool.query(
-      'UPDATE obras SET imagen_principal = ? WHERE id_obra = ?',
+      'UPDATE obras SET imagen_principal = $1 WHERE id_obra = $2',
       [imageUrl, id_obra]
     );
 
     // También actualizar en imagenes_obras si existe
-    const [imagenExistente] = await pool.query(
-      'SELECT id_imagen FROM imagenes_obras WHERE id_obra = ? AND es_principal = 1',
+    const imagenExistente = await pool.query(
+      'SELECT id_imagen FROM imagenes_obras WHERE id_obra = $1 AND es_principal = TRUE',
       [id_obra]
     );
 
-    if (imagenExistente.length > 0) {
+    if (imagenExistente.rows.length > 0) {
       await pool.query(
-        'UPDATE imagenes_obras SET url_imagen = ? WHERE id_imagen = ?',
-        [imageUrl, imagenExistente[0].id_imagen]
+        'UPDATE imagenes_obras SET url_imagen = $1 WHERE id_imagen = $2',
+        [imageUrl, imagenExistente.rows[0].id_imagen]
       );
     } else {
       await pool.query(
-        'INSERT INTO imagenes_obras (id_obra, url_imagen, orden, es_principal, activa) VALUES (?, ?, 1, 1, 1)',
+        'INSERT INTO imagenes_obras (id_obra, url_imagen, orden, es_principal, activa) VALUES ($1, $2, 1, TRUE, TRUE)',
         [id_obra, imageUrl]
       );
     }
@@ -100,19 +101,20 @@ export const subirImagenesGaleria = async (req, res) => {
       });
     }
 
+    // ✅ POSTGRESQL - COALESCE
     // Obtener el último orden
-    const [maxOrden] = await pool.query(
-      'SELECT COALESCE(MAX(orden), 0) as max_orden FROM imagenes_obras WHERE id_obra = ?',
+    const maxOrden = await pool.query(
+      'SELECT COALESCE(MAX(orden), 0) as max_orden FROM imagenes_obras WHERE id_obra = $1',
       [id_obra]
     );
 
-    let ordenInicial = maxOrden[0].max_orden + 1;
+    let ordenInicial = maxOrden.rows[0].max_orden + 1;
     const imagenesSubidas = [];
 
     // Insertar cada imagen
     for (const file of req.files) {
       await pool.query(
-        'INSERT INTO imagenes_obras (id_obra, url_imagen, orden, es_principal, activa) VALUES (?, ?, ?, 0, 1)',
+        'INSERT INTO imagenes_obras (id_obra, url_imagen, orden, es_principal, activa) VALUES ($1, $2, $3, FALSE, TRUE)',
         [id_obra, file.path, ordenInicial]
       );
 
@@ -149,20 +151,21 @@ export const eliminarImagenObra = async (req, res) => {
   try {
     const { id_imagen } = req.params;
 
+    // ✅ POSTGRESQL
     // Obtener datos de la imagen
-    const [imagen] = await pool.query(
-      'SELECT url_imagen, es_principal FROM imagenes_obras WHERE id_imagen = ?',
+    const imagen = await pool.query(
+      'SELECT url_imagen, es_principal FROM imagenes_obras WHERE id_imagen = $1',
       [id_imagen]
     );
 
-    if (imagen.length === 0) {
+    if (imagen.rows.length === 0) {
       return res.status(404).json({
         success: false,
         message: 'Imagen no encontrada'
       });
     }
 
-    if (imagen[0].es_principal) {
+    if (imagen.rows[0].es_principal) {
       return res.status(400).json({
         success: false,
         message: 'No se puede eliminar la imagen principal. Primero asigna otra imagen como principal.'
@@ -170,7 +173,7 @@ export const eliminarImagenObra = async (req, res) => {
     }
 
     // Extraer public_id de Cloudinary
-    const urlParts = imagen[0].url_imagen.split('/');
+    const urlParts = imagen.rows[0].url_imagen.split('/');
     const filename = urlParts[urlParts.length - 1];
     const publicId = `nub-studio/obras/${filename.split('.')[0]}`;
 
@@ -178,7 +181,7 @@ export const eliminarImagenObra = async (req, res) => {
     await eliminarImagen(publicId);
 
     // Eliminar de BD
-    await pool.query('DELETE FROM imagenes_obras WHERE id_imagen = ?', [id_imagen]);
+    await pool.query('DELETE FROM imagenes_obras WHERE id_imagen = $1', [id_imagen]);
 
     secureLog.info('Imagen eliminada', { id_imagen, publicId });
 
@@ -211,10 +214,11 @@ export const reordenarImagenes = async (req, res) => {
       });
     }
 
+    // ✅ POSTGRESQL
     // Actualizar orden de cada imagen
     for (let i = 0; i < ordenNuevo.length; i++) {
       await pool.query(
-        'UPDATE imagenes_obras SET orden = ? WHERE id_imagen = ? AND id_obra = ?',
+        'UPDATE imagenes_obras SET orden = $1 WHERE id_imagen = $2 AND id_obra = $3',
         [i + 1, ordenNuevo[i], id_obra]
       );
     }

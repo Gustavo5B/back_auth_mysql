@@ -29,51 +29,62 @@ export const listarObras = async (req, res) => {
       precio_min,
       precio_max,
       destacadas,
-      ordenar = 'recientes' // recientes, antiguos, precio_asc, precio_desc, nombre
+      ordenar = 'recientes'
     } = req.query;
 
     const offset = (page - 1) * limit;
 
     // Construir query dinámicamente
-    let whereConditions = ['o.activa = 1'];
+    let whereConditions = ['o.activa = TRUE'];
     let queryParams = [];
+    let paramCount = 1;
 
     // Filtro por categoría
     if (categoria) {
-      whereConditions.push('o.id_categoria = ?');
+      whereConditions.push(`o.id_categoria = $${paramCount}`);
       queryParams.push(categoria);
+      paramCount++;
     }
 
     // Filtro por artista
     if (artista) {
-      whereConditions.push('o.id_artista = ?');
+      whereConditions.push(`o.id_artista = $${paramCount}`);
       queryParams.push(artista);
+      paramCount++;
     }
 
     // Filtro de obras destacadas
     if (destacadas === 'true') {
-      whereConditions.push('o.destacada = 1');
+      whereConditions.push('o.destacada = TRUE');
     }
 
     // Filtro por rango de precio
     if (precio_min || precio_max) {
+      let precioConditions = [];
+      if (precio_min) {
+        precioConditions.push(`ot.precio_base >= $${paramCount}`);
+        queryParams.push(precio_min);
+        paramCount++;
+      }
+      if (precio_max) {
+        precioConditions.push(`ot.precio_base <= $${paramCount}`);
+        queryParams.push(precio_max);
+        paramCount++;
+      }
       whereConditions.push(`
         EXISTS (
           SELECT 1 FROM obras_tamaños ot
           WHERE ot.id_obra = o.id_obra 
-          AND ot.activo = 1
-          ${precio_min ? 'AND ot.precio_base >= ?' : ''}
-          ${precio_max ? 'AND ot.precio_base <= ?' : ''}
+          AND ot.activo = TRUE
+          ${precioConditions.length > 0 ? 'AND ' + precioConditions.join(' AND ') : ''}
         )
       `);
-      if (precio_min) queryParams.push(precio_min);
-      if (precio_max) queryParams.push(precio_max);
     }
 
     const whereClause = whereConditions.join(' AND ');
 
     // Determinar ORDER BY
-    let orderBy = 'o.fecha_creacion DESC'; // Por defecto: más recientes
+    let orderBy = 'o.fecha_creacion DESC';
     switch(ordenar) {
       case 'antiguos':
         orderBy = 'o.fecha_creacion ASC';
@@ -114,32 +125,34 @@ export const listarObras = async (req, res) => {
         MIN(ot.precio_base) AS precio_minimo,
         MAX(ot.precio_base) AS precio_maximo,
         
-        (SELECT COUNT(*) FROM obras_tamaños WHERE id_obra = o.id_obra AND activo = 1) AS total_tamaños
+        (SELECT COUNT(*) FROM obras_tamaños WHERE id_obra = o.id_obra AND activo = TRUE) AS total_tamaños
         
       FROM obras o
       INNER JOIN artistas a ON o.id_artista = a.id_artista
       INNER JOIN categorias c ON o.id_categoria = c.id_categoria
-      LEFT JOIN obras_tamaños ot ON o.id_obra = ot.id_obra AND ot.activo = 1
+      LEFT JOIN obras_tamaños ot ON o.id_obra = ot.id_obra AND ot.activo = TRUE
       WHERE ${whereClause}
-      GROUP BY o.id_obra
+      GROUP BY o.id_obra, a.id_artista, a.nombre_completo, a.nombre_artistico, 
+               c.id_categoria, c.nombre, c.slug
       ORDER BY ${orderBy}
-      LIMIT ? OFFSET ?
+      LIMIT $${paramCount} OFFSET $${paramCount + 1}
     `;
 
     queryParams.push(parseInt(limit), parseInt(offset));
 
-    const [obras] = await pool.query(query, queryParams);
+    const result = await pool.query(query, queryParams);
+    const obras = result.rows;
 
     // Contar total de obras para paginación
     const countQuery = `
       SELECT COUNT(DISTINCT o.id_obra) as total
       FROM obras o
-      LEFT JOIN obras_tamaños ot ON o.id_obra = ot.id_obra AND ot.activo = 1
+      LEFT JOIN obras_tamaños ot ON o.id_obra = ot.id_obra AND ot.activo = TRUE
       WHERE ${whereClause}
     `;
 
-    const [countResult] = await pool.query(countQuery, queryParams.slice(0, -2));
-    const total = countResult[0].total;
+    const countResult = await pool.query(countQuery, queryParams.slice(0, -2));
+    const total = parseInt(countResult.rows[0].total);
 
     secureLog.info('Obras listadas', { 
       total, 
@@ -188,20 +201,20 @@ export const obtenerObraPorId = async (req, res) => {
       FROM obras o
       INNER JOIN artistas a ON o.id_artista = a.id_artista
       INNER JOIN categorias c ON o.id_categoria = c.id_categoria
-      WHERE o.id_obra = ? AND o.activa = 1
+      WHERE o.id_obra = $1 AND o.activa = TRUE
       LIMIT 1
     `;
 
-    const [obras] = await pool.query(queryObra, [id]);
+    const resultObra = await pool.query(queryObra, [id]);
 
-    if (obras.length === 0) {
+    if (resultObra.rows.length === 0) {
       return res.status(404).json({ 
         success: false,
         message: "Obra no encontrada" 
       });
     }
 
-    const obra = obras[0];
+    const obra = resultObra.rows[0];
 
     // 2️⃣ TAMAÑOS DISPONIBLES CON PRECIOS
     const queryTamaños = `
@@ -215,11 +228,12 @@ export const obtenerObraPorId = async (req, res) => {
         t.alto_cm
       FROM obras_tamaños ot
       INNER JOIN tamaños_disponibles t ON ot.id_tamaño = t.id_tamaño
-      WHERE ot.id_obra = ? AND ot.activo = 1 AND t.activo = 1
+      WHERE ot.id_obra = $1 AND ot.activo = TRUE AND t.activo = TRUE
       ORDER BY ot.precio_base ASC
     `;
 
-    const [tamaños] = await pool.query(queryTamaños, [id]);
+    const resultTamaños = await pool.query(queryTamaños, [id]);
+    const tamaños = resultTamaños.rows;
 
     // 3️⃣ OPCIONES DE MARCO POR TAMAÑO
     for (let tamaño of tamaños) {
@@ -234,12 +248,12 @@ export const obtenerObraPorId = async (req, res) => {
           tm.imagen AS marco_imagen
         FROM obras_marcos om
         INNER JOIN tipos_marco tm ON om.id_tipo_marco = tm.id_tipo_marco
-        WHERE om.id_obra_tamaño = ? AND om.activo = 1 AND tm.activo = 1
+        WHERE om.id_obra_tamaño = $1 AND om.activo = TRUE AND tm.activo = TRUE
         ORDER BY om.precio_total ASC
       `;
 
-      const [marcos] = await pool.query(queryMarcos, [tamaño.id_obra_tamaño]);
-      tamaño.marcos = marcos;
+      const resultMarcos = await pool.query(queryMarcos, [tamaño.id_obra_tamaño]);
+      tamaño.marcos = resultMarcos.rows;
     }
 
     // 4️⃣ GALERÍA DE IMÁGENES
@@ -250,11 +264,12 @@ export const obtenerObraPorId = async (req, res) => {
         orden,
         es_principal
       FROM imagenes_obras
-      WHERE id_obra = ? AND activa = 1
+      WHERE id_obra = $1 AND activa = TRUE
       ORDER BY es_principal DESC, orden ASC
     `;
 
-    const [imagenes] = await pool.query(queryImagenes, [id]);
+    const resultImagenes = await pool.query(queryImagenes, [id]);
+    const imagenes = resultImagenes.rows;
 
     // 5️⃣ ETIQUETAS
     const queryEtiquetas = `
@@ -264,15 +279,16 @@ export const obtenerObraPorId = async (req, res) => {
         e.slug
       FROM obras_etiquetas oe
       INNER JOIN etiquetas e ON oe.id_etiqueta = e.id_etiqueta
-      WHERE oe.id_obra = ? AND e.activa = 1
+      WHERE oe.id_obra = $1 AND e.activa = TRUE
     `;
 
-    const [etiquetas] = await pool.query(queryEtiquetas, [id]);
+    const resultEtiquetas = await pool.query(queryEtiquetas, [id]);
+    const etiquetas = resultEtiquetas.rows;
 
     // 6️⃣ INCREMENTAR CONTADOR DE VISTAS
-    await pool.query('UPDATE obras SET vistas = vistas + 1 WHERE id_obra = ?', [id]);
+    await pool.query('UPDATE obras SET vistas = vistas + 1 WHERE id_obra = $1', [id]);
 
-    // 7️⃣ OBRAS RELACIONADAS (misma categoría, mismo artista)
+    // 7️⃣ OBRAS RELACIONADAS - ✅ PostgreSQL usa RANDOM() en lugar de RAND()
     const queryRelacionadas = `
       SELECT 
         o.id_obra,
@@ -283,16 +299,17 @@ export const obtenerObraPorId = async (req, res) => {
         MIN(ot.precio_base) AS precio_minimo
       FROM obras o
       INNER JOIN artistas a ON o.id_artista = a.id_artista
-      LEFT JOIN obras_tamaños ot ON o.id_obra = ot.id_obra AND ot.activo = 1
-      WHERE o.activa = 1 
-        AND o.id_obra != ?
-        AND (o.id_categoria = ? OR o.id_artista = ?)
-      GROUP BY o.id_obra
-      ORDER BY RAND()
+      LEFT JOIN obras_tamaños ot ON o.id_obra = ot.id_obra AND ot.activo = TRUE
+      WHERE o.activa = TRUE
+        AND o.id_obra != $1
+        AND (o.id_categoria = $2 OR o.id_artista = $3)
+      GROUP BY o.id_obra, a.nombre_artistico
+      ORDER BY RANDOM()
       LIMIT 4
     `;
 
-    const [relacionadas] = await pool.query(queryRelacionadas, [id, obra.id_categoria, obra.id_artista]);
+    const resultRelacionadas = await pool.query(queryRelacionadas, [id, obra.id_categoria, obra.id_artista]);
+    const relacionadas = resultRelacionadas.rows;
 
     // 8️⃣ RESPUESTA COMPLETA
     res.json({
@@ -322,12 +339,12 @@ export const obtenerObraPorSlug = async (req, res) => {
   try {
     const { slug } = req.params;
 
-    const [obras] = await pool.query(
-      'SELECT id_obra FROM obras WHERE slug = ? AND activa = 1 LIMIT 1',
+    const result = await pool.query(
+      'SELECT id_obra FROM obras WHERE slug = $1 AND activa = TRUE LIMIT 1',
       [slug]
     );
 
-    if (obras.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ 
         success: false,
         message: "Obra no encontrada" 
@@ -335,7 +352,7 @@ export const obtenerObraPorSlug = async (req, res) => {
     }
 
     // Reutilizar la función de obtener por ID
-    req.params.id = obras[0].id_obra;
+    req.params.id = result.rows[0].id_obra;
     return obtenerObraPorId(req, res);
 
   } catch (error) {
@@ -364,6 +381,7 @@ export const buscarObras = async (req, res) => {
     const offset = (page - 1) * limit;
     const searchTerm = `%${q}%`;
 
+    // ✅ PostgreSQL: ILIKE es case-insensitive (mejor que LIKE)
     const query = `
       SELECT 
         o.id_obra,
@@ -378,24 +396,22 @@ export const buscarObras = async (req, res) => {
       FROM obras o
       INNER JOIN artistas a ON o.id_artista = a.id_artista
       INNER JOIN categorias c ON o.id_categoria = c.id_categoria
-      LEFT JOIN obras_tamaños ot ON o.id_obra = ot.id_obra AND ot.activo = 1
-      WHERE o.activa = 1 
+      LEFT JOIN obras_tamaños ot ON o.id_obra = ot.id_obra AND ot.activo = TRUE
+      WHERE o.activa = TRUE
         AND (
-          o.titulo LIKE ? 
-          OR o.descripcion LIKE ?
-          OR a.nombre_completo LIKE ?
-          OR a.nombre_artistico LIKE ?
-          OR c.nombre LIKE ?
+          o.titulo ILIKE $1
+          OR o.descripcion ILIKE $1
+          OR a.nombre_completo ILIKE $1
+          OR a.nombre_artistico ILIKE $1
+          OR c.nombre ILIKE $1
         )
-      GROUP BY o.id_obra
+      GROUP BY o.id_obra, a.nombre_completo, a.nombre_artistico, c.nombre
       ORDER BY o.fecha_creacion DESC
-      LIMIT ? OFFSET ?
+      LIMIT $2 OFFSET $3
     `;
 
-    const [resultados] = await pool.query(query, [
-      searchTerm, searchTerm, searchTerm, searchTerm, searchTerm,
-      parseInt(limit), parseInt(offset)
-    ]);
+    const result = await pool.query(query, [searchTerm, parseInt(limit), parseInt(offset)]);
+    const resultados = result.rows;
 
     // Contar total
     const countQuery = `
@@ -403,21 +419,18 @@ export const buscarObras = async (req, res) => {
       FROM obras o
       INNER JOIN artistas a ON o.id_artista = a.id_artista
       INNER JOIN categorias c ON o.id_categoria = c.id_categoria
-      WHERE o.activa = 1 
+      WHERE o.activa = TRUE
         AND (
-          o.titulo LIKE ? 
-          OR o.descripcion LIKE ?
-          OR a.nombre_completo LIKE ?
-          OR a.nombre_artistico LIKE ?
-          OR c.nombre LIKE ?
+          o.titulo ILIKE $1
+          OR o.descripcion ILIKE $1
+          OR a.nombre_completo ILIKE $1
+          OR a.nombre_artistico ILIKE $1
+          OR c.nombre ILIKE $1
         )
     `;
 
-    const [countResult] = await pool.query(countQuery, [
-      searchTerm, searchTerm, searchTerm, searchTerm, searchTerm
-    ]);
-
-    const total = countResult[0].total;
+    const countResult = await pool.query(countQuery, [searchTerm]);
+    const total = parseInt(countResult.rows[0].total);
 
     secureLog.info('Búsqueda realizada', { q, total });
 
@@ -471,19 +484,19 @@ export const obtenerObrasPorEtiqueta = async (req, res) => {
     const offset = (page - 1) * limit;
 
     // Obtener ID de la etiqueta
-    const [etiquetas] = await pool.query(
-      'SELECT id_etiqueta, nombre FROM etiquetas WHERE slug = ? AND activa = 1',
+    const resultEtiqueta = await pool.query(
+      'SELECT id_etiqueta, nombre FROM etiquetas WHERE slug = $1 AND activa = TRUE',
       [slug]
     );
 
-    if (etiquetas.length === 0) {
+    if (resultEtiqueta.rows.length === 0) {
       return res.status(404).json({ 
         success: false,
         message: "Etiqueta no encontrada" 
       });
     }
 
-    const etiqueta = etiquetas[0];
+    const etiqueta = resultEtiqueta.rows[0];
 
     const query = `
       SELECT 
@@ -498,24 +511,25 @@ export const obtenerObrasPorEtiqueta = async (req, res) => {
       INNER JOIN obras_etiquetas oe ON o.id_obra = oe.id_obra
       INNER JOIN artistas a ON o.id_artista = a.id_artista
       INNER JOIN categorias c ON o.id_categoria = c.id_categoria
-      LEFT JOIN obras_tamaños ot ON o.id_obra = ot.id_obra AND ot.activo = 1
-      WHERE oe.id_etiqueta = ? AND o.activa = 1
-      GROUP BY o.id_obra
+      LEFT JOIN obras_tamaños ot ON o.id_obra = ot.id_obra AND ot.activo = TRUE
+      WHERE oe.id_etiqueta = $1 AND o.activa = TRUE
+      GROUP BY o.id_obra, a.nombre_artistico, c.nombre
       ORDER BY o.fecha_creacion DESC
-      LIMIT ? OFFSET ?
+      LIMIT $2 OFFSET $3
     `;
 
-    const [obras] = await pool.query(query, [etiqueta.id_etiqueta, parseInt(limit), parseInt(offset)]);
+    const resultObras = await pool.query(query, [etiqueta.id_etiqueta, parseInt(limit), parseInt(offset)]);
+    const obras = resultObras.rows;
 
     const countQuery = `
       SELECT COUNT(DISTINCT o.id_obra) as total
       FROM obras o
       INNER JOIN obras_etiquetas oe ON o.id_obra = oe.id_obra
-      WHERE oe.id_etiqueta = ? AND o.activa = 1
+      WHERE oe.id_etiqueta = $1 AND o.activa = TRUE
     `;
 
-    const [countResult] = await pool.query(countQuery, [etiqueta.id_etiqueta]);
-    const total = countResult[0].total;
+    const countResult = await pool.query(countQuery, [etiqueta.id_etiqueta]);
+    const total = parseInt(countResult.rows[0].total);
 
     res.json({
       success: true,
@@ -547,7 +561,9 @@ export const obtenerObrasDestacadas = async (req, res) => {
   return listarObras(req, res);
 };
 
-
+// =========================================================
+// ➕ CREAR OBRA (CON CLOUDINARY)
+// =========================================================
 export const crearObra = async (req, res) => {
   try {
     const { 
@@ -590,6 +606,7 @@ export const crearObra = async (req, res) => {
     // ✅ OBTENER URL DE LA IMAGEN SUBIDA A CLOUDINARY
     const imagen_principal = req.file.path;
 
+    // ✅ POSTGRESQL: Usar RETURNING
     const query = `
       INSERT INTO obras (
         titulo,
@@ -603,10 +620,11 @@ export const crearObra = async (req, res) => {
         destacada,
         id_usuario_creacion,
         activa
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE)
+      RETURNING id_obra
     `;
 
-    const [resultado] = await pool.query(query, [
+    const result = await pool.query(query, [
       titulo,
       slug,
       descripcion,
@@ -615,12 +633,14 @@ export const crearObra = async (req, res) => {
       anio_creacion || null,
       tecnica || null,
       imagen_principal,
-      destacada ? 1 : 0,
+      destacada || false,
       id_usuario
     ]);
 
+    const id_obra = result.rows[0].id_obra;
+
     secureLog.info('Obra creada exitosamente', { 
-      id_obra: resultado.insertId,
+      id_obra,
       imagen: imagen_principal 
     });
 
@@ -628,7 +648,7 @@ export const crearObra = async (req, res) => {
       success: true,
       message: 'Obra creada exitosamente',
       data: { 
-        id_obra: resultado.insertId,
+        id_obra,
         slug,
         imagen_principal 
       }
@@ -642,6 +662,7 @@ export const crearObra = async (req, res) => {
     });
   }
 };
+
 // =========================================================
 // ✏️ ACTUALIZAR OBRA
 // =========================================================
@@ -661,14 +682,14 @@ export const actualizarObra = async (req, res) => {
     const query = `
       UPDATE obras 
       SET 
-        titulo = ?,
-        descripcion = ?,
-        id_categoria = ?,
-        id_artista = ?,
-        anio_creacion = ?,
-        tecnica = ?,
-        destacada = ?
-      WHERE id_obra = ?
+        titulo = $1,
+        descripcion = $2,
+        id_categoria = $3,
+        id_artista = $4,
+        anio_creacion = $5,
+        tecnica = $6,
+        destacada = $7
+      WHERE id_obra = $8
     `;
 
     await pool.query(query, [
@@ -678,7 +699,7 @@ export const actualizarObra = async (req, res) => {
       id_artista,
       anio_creacion || null,
       tecnica || null,
-      destacada ? 1 : 0,
+      destacada || false,
       id
     ]);
 
@@ -688,7 +709,7 @@ export const actualizarObra = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Error al actualizar obra:', error);
+    secureLog.error('Error al actualizar obra', error);
     res.status(500).json({
       success: false,
       message: 'Error al actualizar la obra'

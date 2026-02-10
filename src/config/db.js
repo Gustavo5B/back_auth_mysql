@@ -1,30 +1,24 @@
-import mysql from "mysql2/promise";
+import pkg from 'pg';
+const { Pool } = pkg;
 import dotenv from "dotenv";
 
 dotenv.config();
 
-export const pool = mysql.createPool({
+export const pool = new Pool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
-  port: parseInt(process.env.DB_PORT, 10),
+  port: parseInt(process.env.DB_PORT, 10) || 5432,
   
-  // ✅ CONFIGURACIÓN CORRECTA (sin acquireTimeout ni timeout)
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  connectTimeout: 60000,        // ✅ Este SÍ es válido
-  enableKeepAlive: true,
-  keepAliveInitialDelay: 0,
+  // ✅ CONFIGURACIÓN DE POSTGRESQL
+  max: 10,                      // máximo de conexiones en el pool
+  idleTimeoutMillis: 30000,     // cerrar conexiones inactivas después de 30s
+  connectionTimeoutMillis: 2000, // timeout para obtener conexión
   
   // ✅ Configuración adicional
-  multipleStatements: false,
-  dateStrings: true,
-  supportBigNumbers: true,
-  bigNumberStrings: true,
-  charset: 'utf8mb4',
-  timezone: '+00:00'
+  ssl: false,                   // cambiar a true si usas SSL
+  application_name: 'nuub_studio_backend'
 });
 
 // Alias para compatibilidad
@@ -32,32 +26,38 @@ export const poolPromise = pool;
 
 // Test de conexión
 export const testConnection = async () => {
-  let connection;
+  let client;
   try {
-    connection = await pool.getConnection();
-    await connection.ping();
-    console.log(`🟢 Conectado a MySQL (${process.env.DB_NAME})`);
+    client = await pool.connect();
+    const result = await client.query('SELECT NOW()');
+    console.log(`🟢 Conectado a PostgreSQL (${process.env.DB_NAME})`);
     console.log(`📍 Host: ${process.env.DB_HOST}:${process.env.DB_PORT}`);
+    console.log(`⏰ Server time: ${result.rows[0].now}`);
     return true;
   } catch (error) {
-    console.error("❌ Error de conexión a MySQL:", error.message);
+    console.error("❌ Error de conexión a PostgreSQL:", error.message);
     console.error("💡 Verifica que:");
-    console.error("   - MySQL esté corriendo en localhost:3306");
+    console.error("   - PostgreSQL esté corriendo en localhost:5432");
     console.error("   - Las credenciales en .env sean correctas");
     console.error("   - La base de datos 'nuub_studio' exista");
     return false;
   } finally {
-    if (connection) connection.release();
+    if (client) client.release();
   }
 };
 
-// Manejo de errores del pool
-pool.on('connection', () => {
-  console.log('🔌 Nueva conexión MySQL establecida');
+// Manejo de eventos del pool
+pool.on('connect', () => {
+  console.log('🔌 Nueva conexión PostgreSQL establecida');
 });
 
 pool.on('error', (err) => {
-  console.error('❌ Error inesperado en el pool de MySQL:', err.message);
+  console.error('❌ Error inesperado en el pool de PostgreSQL:', err.message);
+  process.exit(-1);
+});
+
+pool.on('remove', () => {
+  console.log('🔌 Conexión PostgreSQL removida del pool');
 });
 
 // Helper para ejecutar queries con reintentos
@@ -80,3 +80,8 @@ export const queryWithRetry = async (sql, params, maxRetries = 3) => {
   
   throw lastError;
 };
+
+// ✅ HELPER PARA COMPATIBILIDAD: pool.query vs pool.execute
+// PostgreSQL usa .query() en lugar de .execute()
+// Este wrapper mantiene compatibilidad con tu código existente
+pool.execute = pool.query;

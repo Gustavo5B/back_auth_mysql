@@ -52,12 +52,12 @@ export const setupTOTP = async (req, res) => {
     // Generar QR Code (imagen base64)
     const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
 
+    // ✅ POSTGRESQL
     // Guardar el secreto temporalmente en BD
     await pool.query(
-      `UPDATE Usuarios 
-       SET secreto_2fa = ?, metodo_2fa = 'TOTP', esta_2fa_habilitado = 0 
-       WHERE correo = ? 
-       LIMIT 1`,
+      `UPDATE usuarios 
+       SET secret_2fa = $1, requiere_2fa = FALSE
+       WHERE correo = $2`,
       [secret.base32, correo]
     );
 
@@ -87,17 +87,18 @@ export const verifyTOTP = async (req, res) => {
       return res.status(400).json({ message: "Correo y código requeridos" });
     }
 
-    const [rows] = await pool.query(
-      "SELECT id_usuario, secreto_2fa FROM Usuarios WHERE correo = ? LIMIT 1",
+    // ✅ POSTGRESQL
+    const result = await pool.query(
+      "SELECT id_usuario, secret_2fa FROM usuarios WHERE correo = $1 LIMIT 1",
       [correo]
     );
 
-    if (rows.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ message: "Usuario no encontrado" });
     }
 
-    const user = rows[0];
-    const secret = user.secreto_2fa;
+    const user = result.rows[0];
+    const secret = user.secret_2fa;
 
     // Verificar el código TOTP
     const verified = speakeasy.totp.verify({
@@ -108,11 +109,11 @@ export const verifyTOTP = async (req, res) => {
     });
 
     if (verified) {
+      // ✅ POSTGRESQL - ACTUALIZAR CON MÉTODO
       await pool.query(
-        `UPDATE Usuarios 
-         SET esta_2fa_habilitado = 1 
-         WHERE correo = ? 
-         LIMIT 1`,
+        `UPDATE usuarios 
+         SET requiere_2fa = TRUE, metodo_2fa = 'TOTP'
+         WHERE correo = $1`,
         [correo]
       );
 
@@ -142,17 +143,18 @@ export const validateTOTP = async (req, res) => {
       return res.status(400).json({ message: "Correo y código requeridos" });
     }
 
-    const [rows] = await pool.query(
-      "SELECT id_usuario, secreto_2fa FROM Usuarios WHERE correo = ? LIMIT 1",
+    // ✅ POSTGRESQL
+    const result = await pool.query(
+      "SELECT id_usuario, secret_2fa FROM usuarios WHERE correo = $1 LIMIT 1",
       [correo]
     );
 
-    if (rows.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ message: "Usuario no encontrado" });
     }
 
-    const user = rows[0];
-    const secret = user.secreto_2fa;
+    const user = result.rows[0];
+    const secret = user.secret_2fa;
 
     const verified = speakeasy.totp.verify({
       secret,

@@ -95,8 +95,8 @@ const calcularTiempoBloqueo = (bloqueosTotales) => {
 const registrarHistorialLogin = async (usuario, tipo, razon = null) => {
   try {
     await pool.query(
-      `INSERT INTO Historial_Login (id_usuario, correo, tipo, razon_fallo) 
-       VALUES (?, ?, ?, ?)`,
+      `INSERT INTO historial_login (id_usuario, correo, tipo_evento, detalles) 
+       VALUES ($1, $2, $3, $4)`,
       [usuario?.id_usuario || null, usuario?.correo || 'desconocido', tipo, razon]
     );
   } catch (error) {
@@ -134,13 +134,13 @@ export const register = async (req, res) => {
       });
     }
 
-    // Verificar si el correo ya existe
-    const [existingUser] = await pool.query(
-      "SELECT id_usuario FROM Usuarios WHERE correo = ? LIMIT 1",
+    // ✅ POSTGRESQL: usar result.rows
+    const existingUser = await pool.query(
+      "SELECT id_usuario FROM usuarios WHERE correo = $1 LIMIT 1",
       [correo]
     );
 
-    if (existingUser.length > 0) {
+    if (existingUser.rows.length > 0) {
       secureLog.security('REGISTRO_DUPLICADO', null, { email: maskEmail(correo) });
       return res.status(400).json({ 
         message: "El correo ya está registrado." 
@@ -151,18 +151,20 @@ export const register = async (req, res) => {
     const saltRounds = 12;
     const hash = await bcrypt.hash(contrasena, saltRounds);
 
-    // Insertar nuevo usuario
-    const [result] = await pool.query(
-      "INSERT INTO Usuarios (nombre, correo, contrasena, estado) VALUES (?, ?, ?, ?)",
-      [nombre, correo, hash, "Activo"]
+    // ✅ POSTGRESQL: INSERT con RETURNING
+    const result = await pool.query(
+      "INSERT INTO usuarios (nombre_completo, correo, contraseña_hash, estado) VALUES ($1, $2, $3, $4) RETURNING id_usuario",
+      [nombre, correo, hash, "activo"]
     );
 
-    secureLog.security('REGISTRO_EXITOSO', result.insertId, { correo });
+    const newUserId = result.rows[0].id_usuario;
+
+    secureLog.security('REGISTRO_EXITOSO', newUserId, { correo });
 
     // ENVIAR EMAIL DE BIENVENIDA DE FORMA ASÍNCRONA
     sendWelcomeEmail(correo, nombre)
       .then(() => {
-        secureLog.info('Email de bienvenida enviado', { userId: result.insertId });
+        secureLog.info('Email de bienvenida enviado', { userId: newUserId });
       })
       .catch((emailError) => {
         secureLog.error('Error enviando email de bienvenida', emailError);
@@ -171,7 +173,7 @@ export const register = async (req, res) => {
     res.status(201).json({ 
       message: "Usuario registrado exitosamente ✅",
       user: {
-        id: result.insertId,
+        id: newUserId,
         nombre,
         correo
       }
@@ -180,7 +182,8 @@ export const register = async (req, res) => {
   } catch (error) {
     secureLog.error('Error en registro', error);
     
-    if (error.code === 'ER_DUP_ENTRY') {
+    // ✅ POSTGRESQL: código de error diferente
+    if (error.code === '23505') { // unique_violation
       return res.status(400).json({ 
         message: "El correo ya está registrado." 
       });
@@ -206,18 +209,18 @@ export const login = async (req, res) => {
       return res.status(400).json({ message: "Correo y contraseña son obligatorios." });
     }
 
-    // 2️⃣ BUSCAR USUARIO
-    const [rows] = await pool.query(
-      "SELECT * FROM Usuarios WHERE correo = ? LIMIT 1",
+    // 2️⃣ BUSCAR USUARIO - ✅ POSTGRESQL
+    const result = await pool.query(
+      "SELECT * FROM usuarios WHERE correo = $1 LIMIT 1",
       [correo]
     );
 
-    if (rows.length === 0) {
+    if (result.rows.length === 0) {
       secureLog.security('LOGIN_USUARIO_NO_ENCONTRADO', null, { email: maskEmail(correo) });
       return res.status(404).json({ message: "Usuario no encontrado." });
     }
 
-    const user = rows[0];
+    const user = result.rows[0];
     secureLog.info('Usuario encontrado', { userId: user.id_usuario });
 
     // 3️⃣ VERIFICAR SI ESTÁ BLOQUEADO
@@ -233,7 +236,7 @@ export const login = async (req, res) => {
         });
 
         secureLog.security('LOGIN_BLOQUEADO', user.id_usuario);
-        await registrarHistorialLogin(user, 'bloqueado', 'Intento durante bloqueo');
+        await registrarHistorialLogin(user, 'BLOQUEO', 'Intento durante bloqueo');
 
         return res.status(403).json({
           blocked: true,
@@ -243,46 +246,45 @@ export const login = async (req, res) => {
         });
       } else {
         secureLog.security('DESBLOQUEO_AUTOMATICO', user.id_usuario);
+        // ✅ POSTGRESQL: NOW() + INTERVAL
         await pool.query(
-          `UPDATE Usuarios 
+          `UPDATE usuarios 
            SET bloqueado_hasta = NULL, 
-               intentos_login_fallidos = 0 
-           WHERE id_usuario = ?`,
+               intentos_fallidos = 0 
+           WHERE id_usuario = $1`,
           [user.id_usuario]
         );
         user.bloqueado_hasta = null;
-        user.intentos_login_fallidos = 0;
+        user.intentos_fallidos = 0;
       }
     }
 
     // 4️⃣ VALIDAR CONTRASEÑA
-    const match = await bcrypt.compare(contrasena, user.contrasena);
+    const match = await bcrypt.compare(contrasena, user.contraseña_hash);
 
     if (!match) {
-      const nuevoIntentos = user.intentos_login_fallidos + 1;
+      const nuevoIntentos = (user.intentos_fallidos || 0) + 1;
       
       secureLog.security('LOGIN_CONTRASEÑA_INCORRECTA', user.id_usuario, {
         intento: nuevoIntentos
       });
 
       if (nuevoIntentos >= 3) {
-        const tiempoBloqueo = calcularTiempoBloqueo(user.bloqueos_totales);
+        const tiempoBloqueo = calcularTiempoBloqueo(user.bloqueos_totales || 0);
 
+        // ✅ POSTGRESQL: Sintaxis de intervalo
         await pool.query(
-          `UPDATE Usuarios 
-           SET intentos_login_fallidos = ?,
-               bloqueado_hasta = DATE_ADD(NOW(), INTERVAL ? MINUTE),
-               bloqueos_totales = bloqueos_totales + 1,
-               ultimo_intento_fallido = NOW()
-           WHERE id_usuario = ?`,
-          [nuevoIntentos, tiempoBloqueo, user.id_usuario]
+          `UPDATE usuarios 
+           SET intentos_fallidos = $1,
+               bloqueado_hasta = NOW() + INTERVAL '${tiempoBloqueo} minutes'
+           WHERE id_usuario = $2`,
+          [nuevoIntentos, user.id_usuario]
         );
 
-        await registrarHistorialLogin(user, 'bloqueado', `Bloqueado por ${tiempoBloqueo} minutos`);
+        await registrarHistorialLogin(user, 'BLOQUEO', `Bloqueado por ${tiempoBloqueo} minutos`);
 
         secureLog.security('CUENTA_BLOQUEADA', user.id_usuario, {
-          tiempoBloqueo,
-          bloqueosTotales: user.bloqueos_totales + 1
+          tiempoBloqueo
         });
 
         return res.status(403).json({
@@ -293,14 +295,13 @@ export const login = async (req, res) => {
         });
       } else {
         await pool.query(
-          `UPDATE Usuarios 
-           SET intentos_login_fallidos = ?,
-               ultimo_intento_fallido = NOW()
-           WHERE id_usuario = ?`,
+          `UPDATE usuarios 
+           SET intentos_fallidos = $1
+           WHERE id_usuario = $2`,
           [nuevoIntentos, user.id_usuario]
         );
 
-        await registrarHistorialLogin(user, 'fallido', `Intento ${nuevoIntentos}/3`);
+        await registrarHistorialLogin(user, 'LOGIN_FALLIDO', `Intento ${nuevoIntentos}/3`);
 
         const intentosRestantes = 3 - nuevoIntentos;
 
@@ -313,17 +314,17 @@ export const login = async (req, res) => {
     }
 
     // 5️⃣ CONTRASEÑA CORRECTA - RESETEAR INTENTOS
-    if (user.intentos_login_fallidos > 0) {
+    if (user.intentos_fallidos > 0) {
       await pool.query(
-        'UPDATE Usuarios SET intentos_login_fallidos = 0 WHERE id_usuario = ?',
+        'UPDATE usuarios SET intentos_fallidos = 0 WHERE id_usuario = $1',
         [user.id_usuario]
       );
       secureLog.info('Contador de intentos reseteado', { userId: user.id_usuario });
     }
 
     // 6️⃣ VALIDAR ESTADO DE LA CUENTA
-    if (user.estado !== "Activo") {
-      if (user.estado === "Pendiente") {
+    if (user.estado !== "activo") {
+      if (user.estado === "pendiente") {
         return res.status(403).json({
           message: "Cuenta pendiente de verificación. Revisa tu correo 📧",
           requiresVerification: true,
@@ -333,44 +334,56 @@ export const login = async (req, res) => {
       return res.status(403).json({ message: "Cuenta inactiva o suspendida." });
     }
 
-    // 7️⃣ VERIFICAR 2FA (GMAIL)
-    if (user.metodo_gmail_2fa) {
-      const code = generateCode();
-      await pool.query(
-        'UPDATE Usuarios SET ultimo_codigo_gmail=?, expiracion_codigo_gmail=DATE_ADD(NOW(), INTERVAL 10 MINUTE) WHERE id_usuario=?',
-        [code, user.id_usuario]
-      );
-      
-      secureLog.security('2FA_GMAIL_ENVIADO', user.id_usuario);
-      await sendRecoveryCode(user.correo, code);
-      await registrarHistorialLogin(user, 'exitoso', '2FA Gmail enviado');
+    // 7️⃣ VERIFICAR 2FA - DETECTAR MÉTODO CORRECTO
+    if (user.requiere_2fa) {
+      // ✅ REVISAR QUÉ MÉTODO ESTÁ CONFIGURADO
+      if (user.metodo_2fa === 'TOTP') {
+        // TOTP (Google Authenticator) - NO enviar código
+        secureLog.security('2FA_TOTP_REQUERIDO', user.id_usuario);
+        await registrarHistorialLogin(user, 'LOGIN_EXITOSO', '2FA TOTP requerido');
 
-      return res.json({
-        message: "Se envió un código de acceso a tu correo 📧",
-        requires2FA: true,
-        metodo_2fa: "GMAIL",
-        correo: user.correo,
-      });
+        return res.json({
+          message: "Ingresa el código de tu aplicación autenticadora 📱",
+          requires2FA: true,
+          metodo_2fa: "TOTP",
+          correo: user.correo,
+        });
+      } else if (user.metodo_2fa === 'GMAIL') {
+        // GMAIL 2FA - Enviar código por email
+        const code = generateCode();
+        await pool.query(
+          'UPDATE usuarios SET secret_2fa=$1 WHERE id_usuario=$2',
+          [code, user.id_usuario]
+        );
+        
+        secureLog.security('2FA_GMAIL_ENVIADO', user.id_usuario);
+        await sendRecoveryCode(user.correo, code);
+        await registrarHistorialLogin(user, 'LOGIN_EXITOSO', '2FA Gmail enviado');
+
+        return res.json({
+          message: "Se envió un código de acceso a tu correo 📧",
+          requires2FA: true,
+          metodo_2fa: "GMAIL",
+          correo: user.correo,
+        });
+      } else {
+        // Método no reconocido - resetear 2FA
+        secureLog.security('2FA_METODO_INVALIDO', user.id_usuario, { metodo: user.metodo_2fa });
+        await pool.query(
+          'UPDATE usuarios SET requiere_2fa=FALSE, metodo_2fa=$1 WHERE id_usuario=$2',
+          ['NINGUNO', user.id_usuario]
+        );
+        return res.status(400).json({ 
+          message: "Configuración 2FA inválida. Por favor, contacta al soporte." 
+        });
+      }
     }
 
-    // 8️⃣ VERIFICAR 2FA (TOTP)
-    if (user.esta_2fa_habilitado) {
-      secureLog.security('2FA_TOTP_REQUERIDO', user.id_usuario);
-      await registrarHistorialLogin(user, 'exitoso', '2FA TOTP requerido');
-
-      return res.json({
-        message: "Credenciales correctas",
-        requires2FA: true,
-        metodo_2fa: user.metodo_2fa || "TOTP",
-        correo: user.correo
-      });
-    }
-
-    // 9️⃣ LOGIN EXITOSO SIN 2FA
+    // 8️⃣ LOGIN EXITOSO SIN 2FA
     const token = generateToken(user);
 
     await saveActiveSession(user.id_usuario, token, req);
-    await registrarHistorialLogin(user, 'exitoso', 'Login directo');
+    await registrarHistorialLogin(user, 'LOGIN_EXITOSO', 'Login directo');
 
     secureLog.security('LOGIN_EXITOSO', user.id_usuario);
 
@@ -380,7 +393,7 @@ export const login = async (req, res) => {
       token_type: "bearer",
       usuario: {
         id: user.id_usuario,
-        nombre: user.nombre,
+        nombre: user.nombre_completo,
         correo: user.correo,
         estado: user.estado
       }
@@ -405,21 +418,21 @@ export const loginWith2FA = async (req, res) => {
       return res.status(400).json({ message: "Correo y código son obligatorios" });
     }
 
-    const [rows] = await pool.query(
-      "SELECT * FROM Usuarios WHERE correo = ? LIMIT 1",
+    const result = await pool.query(
+      "SELECT * FROM usuarios WHERE correo = $1 LIMIT 1",
       [correo]
     );
 
-    if (rows.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ message: "Usuario no encontrado." });
     }
 
-    const user = rows[0];
+    const user = result.rows[0];
 
     const speakeasy = (await import("speakeasy")).default;
     
     const verified = speakeasy.totp.verify({
-      secret: user.secreto_2fa,
+      secret: user.secret_2fa,
       encoding: "base32",
       token: codigo2fa,
       window: 2
@@ -430,16 +443,16 @@ export const loginWith2FA = async (req, res) => {
       return res.status(401).json({ message: "Código 2FA incorrecto ❌" });
     }
 
-    if (user.intentos_login_fallidos > 0) {
+    if (user.intentos_fallidos > 0) {
       await pool.query(
-        'UPDATE Usuarios SET intentos_login_fallidos = 0 WHERE id_usuario = ?',
+        'UPDATE usuarios SET intentos_fallidos = 0 WHERE id_usuario = $1',
         [user.id_usuario]
       );
     }
 
     const token = generateToken(user);
     await saveActiveSession(user.id_usuario, token, req);
-    await registrarHistorialLogin(user, 'exitoso', 'Login con 2FA TOTP');
+    await registrarHistorialLogin(user, 'LOGIN_EXITOSO', 'Login con 2FA TOTP');
 
     secureLog.security('2FA_TOTP_EXITOSO', user.id_usuario);
 
@@ -449,7 +462,7 @@ export const loginWith2FA = async (req, res) => {
       token_type: "bearer",
       usuario: {
         id: user.id_usuario,
-        nombre: user.nombre,
+        nombre: user.nombre_completo,
         correo: user.correo,
         estado: user.estado
       }
@@ -473,41 +486,37 @@ export const verifyLoginCode = async (req, res) => {
       return res.status(400).json({ message: "Correo y código son obligatorios" });
     }
 
-    const [rows] = await pool.query(
-      "SELECT * FROM Usuarios WHERE correo = ? AND metodo_gmail_2fa = 1 LIMIT 1",
+    const result = await pool.query(
+      "SELECT * FROM usuarios WHERE correo = $1 AND requiere_2fa = TRUE LIMIT 1",
       [correo]
     );
 
-    if (rows.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ message: "Usuario no encontrado o sin Gmail 2FA" });
     }
 
-    const user = rows[0];
+    const user = result.rows[0];
 
-    if (
-      !user.ultimo_codigo_gmail ||
-      user.ultimo_codigo_gmail !== codigo ||
-      new Date(user.expiracion_codigo_gmail) < new Date()
-    ) {
+    if (!user.secret_2fa || user.secret_2fa !== codigo) {
       secureLog.security('CODIGO_GMAIL_INVALIDO', user.id_usuario);
-      return res.status(401).json({ message: "Código inválido o expirado ❌" });
+      return res.status(401).json({ message: "Código inválido ❌" });
     }
 
     await pool.query(
-      "UPDATE Usuarios SET ultimo_codigo_gmail=NULL, expiracion_codigo_gmail=NULL WHERE id_usuario=?",
+      "UPDATE usuarios SET secret_2fa = NULL WHERE id_usuario = $1",
       [user.id_usuario]
     );
 
-    if (user.intentos_login_fallidos > 0) {
+    if (user.intentos_fallidos > 0) {
       await pool.query(
-        'UPDATE Usuarios SET intentos_login_fallidos = 0 WHERE id_usuario = ?',
+        'UPDATE usuarios SET intentos_fallidos = 0 WHERE id_usuario = $1',
         [user.id_usuario]
       );
     }
 
     const token = generateToken(user);
     await saveActiveSession(user.id_usuario, token, req);
-    await registrarHistorialLogin(user, 'exitoso', 'Login con Gmail 2FA');
+    await registrarHistorialLogin(user, 'LOGIN_EXITOSO', 'Login con Gmail 2FA');
 
     secureLog.security('GMAIL_2FA_EXITOSO', user.id_usuario);
 
@@ -517,7 +526,7 @@ export const verifyLoginCode = async (req, res) => {
       token_type: "bearer",
       usuario: {
         id: user.id_usuario,
-        nombre: user.nombre,
+        nombre: user.nombre_completo,
         correo: user.correo,
         estado: user.estado
       }
